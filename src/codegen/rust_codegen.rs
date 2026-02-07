@@ -116,14 +116,23 @@ impl<'a> BlueprintCodeGenerator<'a> {
         // Generate function signature
         code.push_str(&format!("pub fn {}() {{\n", metadata.name));
 
-        // Find the "Body" exec output and follow it
-        if let Some(body_pin) = metadata.exec_outputs.first() {
-            let connected = self.exec_routing.get_connected_nodes(&event_node.id, body_pin);
-            for next_node_id in connected {
-                if let Some(next_node) = self.graph.nodes.get(next_node_id) {
-                    let mut generator = self.clone_with_new_visited();
-                    let node_code = generator.generate_exec_chain(next_node, 1)?;
-                    code.push_str(&node_code);
+        // Find execution output pins and follow them
+        // We need to look up by pin ID (from the node instance), not pin name (from metadata)
+        for output_pin in &event_node.outputs {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+                tracing::debug!("[CODEGEN] Looking up exec connections for node {} pin ID: {}", 
+                    event_node.id, output_pin.id);
+                
+                let connected = self.exec_routing.get_connected_nodes(&event_node.id, &output_pin.id);
+                
+                tracing::debug!("[CODEGEN] Found {} connected nodes", connected.len());
+                
+                for next_node_id in connected {
+                    if let Some(next_node) = self.graph.nodes.get(next_node_id) {
+                        let mut generator = self.clone_with_new_visited();
+                        let node_code = generator.generate_exec_chain(next_node, 1)?;
+                        code.push_str(&node_code);
+                    }
                 }
             }
         }
@@ -213,13 +222,15 @@ impl<'a> BlueprintCodeGenerator<'a> {
             ));
         }
 
-        // Follow execution chain
-        if let Some(exec_out) = node_meta.exec_outputs.first() {
-            let connected = self.exec_routing.get_connected_nodes(&node.id, exec_out);
-            for next_node_id in connected {
-                if let Some(next_node) = self.graph.nodes.get(next_node_id) {
-                    let next_code = self.generate_exec_chain(next_node, indent_level)?;
-                    code.push_str(&next_code);
+        // Follow execution chain - look up by actual pin IDs from node instance
+        for output_pin in &node.outputs {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
+                for next_node_id in connected {
+                    if let Some(next_node) = self.graph.nodes.get(next_node_id) {
+                        let next_code = self.generate_exec_chain(next_node, indent_level)?;
+                        code.push_str(&next_code);
+                    }
                 }
             }
         }
@@ -237,38 +248,49 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let mut code = String::new();
         let indent = "    ".repeat(indent_level);
 
-        // Build exec_output replacements
+        // Build exec_output replacements - need to map pin names to pin IDs
         let mut exec_replacements = HashMap::new();
 
-        for exec_pin in &node_meta.exec_outputs {
-            let connected = self.exec_routing.get_connected_nodes(&node.id, exec_pin);
+        for output_pin in &node.outputs {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
 
-            let mut exec_code = String::new();
-            let local_visited = self.visited.clone();
+                let mut exec_code = String::new();
+                let local_visited = self.visited.clone();
 
-            for next_node_id in connected {
-                if let Some(next_node) = self.graph.nodes.get(next_node_id) {
-                    let mut sub_gen = BlueprintCodeGenerator {
-                        graph: self.graph,
-                        metadata_provider: self.metadata_provider,
-                        data_resolver: self.data_resolver,
-                        exec_routing: self.exec_routing,
-                        variables: self.variables.clone(),
-                        visited: local_visited.clone(),
-                    };
+                for next_node_id in connected {
+                    if let Some(next_node) = self.graph.nodes.get(next_node_id) {
+                        let mut sub_gen = BlueprintCodeGenerator {
+                            graph: self.graph,
+                            metadata_provider: self.metadata_provider,
+                            data_resolver: self.data_resolver,
+                            exec_routing: self.exec_routing,
+                            variables: self.variables.clone(),
+                            visited: local_visited.clone(),
+                        };
 
-                    let next_code = sub_gen.generate_exec_chain(next_node, 0)?;
-                    exec_code.push_str(&next_code);
+                        let next_code = sub_gen.generate_exec_chain(next_node, 0)?;
+                        exec_code.push_str(&next_code);
+                    }
                 }
-            }
 
-            exec_replacements.insert(exec_pin.clone(), exec_code.trim().to_string());
+                // Use the pin NAME for the template substitution (e.g., "then", "else")
+                exec_replacements.insert(output_pin.pin.name.clone(), exec_code.trim().to_string());
+            }
         }
 
-        // Build parameter substitutions
+        // Build parameter substitutions - need to look up by pin ID
         let mut param_substitutions = HashMap::new();
         for param in &node_meta.params {
-            let value = self.generate_input_expression(&node.id, &param.name)?;
+            // Find the actual pin ID from the node instance
+            let pin_id = node.inputs.iter()
+                .find(|input| input.pin.name == param.name)
+                .map(|input| input.id.clone())
+                .ok_or_else(|| GraphyError::Custom(
+                    format!("Input pin not found for parameter '{}' on node '{}'", param.name, node.id)
+                ))?;
+
+            let value = self.generate_input_expression(&node.id, &pin_id)?;
             param_substitutions.insert(param.name.clone(), value);
         }
 
@@ -299,8 +321,14 @@ impl<'a> BlueprintCodeGenerator<'a> {
             .strip_prefix("set_")
             .ok_or_else(|| GraphyError::Custom(format!("Invalid setter node type: {}", node.node_type)))?;
 
+        // Find the "value" input pin ID
+        let value_pin_id = node.inputs.iter()
+            .find(|input| input.pin.name == "value")
+            .map(|input| input.id.clone())
+            .ok_or_else(|| GraphyError::Custom(format!("Value input not found on setter node: {}", node.id)))?;
+
         // Get the value to set
-        let value_expr = self.generate_input_expression(&node.id, "value")?;
+        let value_expr = self.generate_input_expression(&node.id, &value_pin_id)?;
 
         // Get variable type to determine Cell vs RefCell
         let var_type = self.variables
@@ -325,12 +353,16 @@ impl<'a> BlueprintCodeGenerator<'a> {
             ));
         }
 
-        // Follow execution chain
-        let connected = self.exec_routing.get_connected_nodes(&node.id, "exec_out");
-        for next_node_id in connected {
-            if let Some(next_node) = self.graph.nodes.get(next_node_id) {
-                let next_code = self.generate_exec_chain(next_node, indent_level)?;
-                code.push_str(&next_code);
+        // Follow execution chain - use actual pin IDs from node instance
+        for output_pin in &node.outputs {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
+                for next_node_id in connected {
+                    if let Some(next_node) = self.graph.nodes.get(next_node_id) {
+                        let next_code = self.generate_exec_chain(next_node, indent_level)?;
+                        code.push_str(&next_code);
+                    }
+                }
             }
         }
 
@@ -342,7 +374,19 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let mut args = Vec::new();
 
         for param in &node_meta.params {
-            let value = self.generate_input_expression(&node.id, &param.name)?;
+            // Find the actual pin ID from the node instance
+            // Pin IDs are typically "{node_id}_{param_name}"
+            let pin_id = node.inputs.iter()
+                .find(|input| {
+                    // Match by name - the pin's name should match the param name
+                    input.pin.name == param.name
+                })
+                .map(|input| input.id.clone())
+                .ok_or_else(|| GraphyError::Custom(
+                    format!("Input pin not found for parameter '{}' on node '{}'", param.name, node.id)
+                ))?;
+
+            let value = self.generate_input_expression(&node.id, &pin_id)?;
             args.push(value);
         }
 
@@ -350,10 +394,11 @@ impl<'a> BlueprintCodeGenerator<'a> {
     }
 
     /// Generate expression for an input value
-    fn generate_input_expression(&self, node_id: &str, pin_name: &str) -> Result<String, GraphyError> {
+    /// pin_id should be the actual pin ID from the node instance (e.g., "print_1_value")
+    fn generate_input_expression(&self, node_id: &str, pin_id: &str) -> Result<String, GraphyError> {
         use graphy::analysis::DataSource;
 
-        match self.data_resolver.get_input_source(node_id, pin_name) {
+        match self.data_resolver.get_input_source(node_id, pin_id) {
             Some(DataSource::Connection { source_node_id, source_pin }) => {
                 let source_node = self.graph.nodes.get(source_node_id)
                     .ok_or_else(|| GraphyError::NodeNotFound(source_node_id.clone()))?;
@@ -390,19 +435,19 @@ impl<'a> BlueprintCodeGenerator<'a> {
             Some(DataSource::Default) => {
                 // Use default value for the type
                 if let Some(node) = self.graph.nodes.get(node_id) {
-                    if let Some(pin) = node.inputs.iter().find(|p| p.id == pin_name) {
+                    if let Some(pin) = node.inputs.iter().find(|p| p.id == pin_id) {
                         Ok(get_default_value(&pin.pin.data_type))
                     } else {
                         Err(GraphyError::PinNotFound {
                             node: node_id.to_string(),
-                            pin: pin_name.to_string(),
+                            pin: pin_id.to_string(),
                         })
                     }
                 } else {
                     Err(GraphyError::NodeNotFound(node_id.to_string()))
                 }
             }
-            None => Err(GraphyError::Custom(format!("No data source for input: {}.{}", node_id, pin_name))),
+            None => Err(GraphyError::Custom(format!("No data source for input: {}.{}", node_id, pin_id))),
         }
     }
 

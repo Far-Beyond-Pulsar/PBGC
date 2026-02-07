@@ -53,8 +53,11 @@ pub use compiler::{
 pub use graphy::{
     GraphDescription, NodeInstance, Connection, Pin, PinInstance,
     DataType, NodeTypes, Position, ConnectionType, PropertyValue,
-    GraphMetadata, Result, GraphyError,
+    GraphMetadata, Result, GraphyError, PinType,
 };
+
+// Re-export TypeInfo from graphy::core
+pub use graphy::core::TypeInfo;
 
 // Re-export metadata types
 pub use metadata::{
