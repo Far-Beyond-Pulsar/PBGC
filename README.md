@@ -1,6 +1,6 @@
 # PBGC - Pulsar Blueprint Graph Compiler
 
-Production-ready compiler for Pulsar Blueprint visual scripts to Rust code.
+Compiler for Pulsar Blueprint visual scripts to Rust code.
 
 ## Features
 
