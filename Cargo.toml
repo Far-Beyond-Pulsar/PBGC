@@ -1,0 +1,28 @@
+[package]
+name = "pbgc"
+version = "0.1.0"
+edition = "2021"
+authors = ["Pulsar Team"]
+description = "Pulsar Blueprint Graph Compiler - Production-ready compiler for Blueprint visual scripts"
+license = "MIT"
+
+[dependencies]
+# General graph compilation library
+graphy = { path = "../Graphy" }
+
+# NOTE: When using this in production, replace with actual pulsar-std dependency
+# For now, this is a placeholder for the pulsar_std integration
+# pulsar-std = { path = "../path/to/pulsar-std" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Error handling
+thiserror = "1.0"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
