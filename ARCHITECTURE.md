@@ -6,6 +6,19 @@ PBGC (Pulsar Blueprint Graph Compiler) is built in two layers:
 
 ```
 ┌─────────────────────────────────────┐
+│      Pulsar-Native (Engine)         │
+│  ┌───────────────────────────────┐  │
+│  │   blueprint_compiler crate    │  │
+│  │   (thin wrapper for engine)   │  │
+│  └─────────────┬─────────────────┘  │
+│                │                     │
+│    ┌───────────▼────────────┐       │
+│    │     pulsar_std         │       │
+│    │  (node definitions)    │       │
+│    └────────────────────────┘       │
+└─────────────────┬───────────────────┘
+                  │
+┌─────────────────▼───────────────────┐
 │           PBGC (Blueprint)          │
 │  - pulsar_std integration           │
 │  - Rust code generation             │
@@ -55,6 +68,23 @@ PBGC (Pulsar Blueprint Graph Compiler) is built in two layers:
 5. **Code Generation** - Generate Rust code (PBGC)
 
 ## Key Design Decisions
+
+### Repository Organization
+
+**Pulsar-Native (Engine Repository)**:
+- `crates/pulsar_std` - Standard library with node definitions
+- `crates/pulsar_macros` - Macro support for node registration
+- `crates/blueprint_compiler` - Thin wrapper that re-exports PBGC for engine use
+
+**PBGC (Compiler Repository)**:
+- Imports `pulsar_std` from Pulsar-Native via path dependency
+- Provides Blueprint-specific code generation on top of Graphy
+- Can be used standalone or through the engine's wrapper
+
+**Graphy (Analysis Library Repository)**:
+- General-purpose graph compilation library
+- No Blueprint or engine-specific code
+- Reusable for other graph compilation tasks (e.g., PSGC shader compiler)
 
 ### Why Separate Graphy?
 

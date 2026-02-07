@@ -8,11 +8,10 @@ license = "MIT"
 
 [dependencies]
 # General graph compilation library
-graphy =  { git = "https://github.com/Far-Beyond-Pulsar/Graphy", rev = "0cd1d0c0e8420757f98c480ab9c4ab28e2f63ae0" }
+graphy = { git = "https://github.com/Far-Beyond-Pulsar/Graphy", rev = "0cd1d0c0e8420757f98c480ab9c4ab28e2f63ae0" }
 
-# NOTE: When using this in production, replace with actual pulsar-std dependency
-# For now, this is a placeholder for the pulsar_std integration
-# pulsar-std = { path = "../path/to/pulsar-std" }
+# Pulsar standard library integration
+pulsar_std = { path = "../Pulsar-Native/crates/pulsar_std" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
