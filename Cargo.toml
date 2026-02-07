@@ -11,7 +11,7 @@ license = "MIT"
 graphy = { git = "https://github.com/Far-Beyond-Pulsar/Graphy", rev = "0cd1d0c0e8420757f98c480ab9c4ab28e2f63ae0" }
 
 # Pulsar standard library integration
-pulsar_std = { path = "../Pulsar-Native/crates/pulsar_std" }
+pulsar_std = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Native", rev = "812db780cb2b4d7b3882d6fda3d4a4ab076ae4ba" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
