@@ -11,7 +11,7 @@ PBGC (Pulsar Blueprint Graph Compiler) is built in two layers:
 │  │   blueprint_compiler crate    │  │
 │  │   (thin wrapper for engine)   │  │
 │  └─────────────┬─────────────────┘  │
-│                │                     │
+│                │                    │
 │    ┌───────────▼────────────┐       │
 │    │     pulsar_std         │       │
 │    │  (node definitions)    │       │
