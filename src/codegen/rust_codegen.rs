@@ -460,7 +460,15 @@ impl<'a> BlueprintCodeGenerator<'a> {
         // Recursively generate arguments
         let mut args = Vec::new();
         for param in &node_meta.params {
-            let arg_expr = self.generate_input_expression(&node.id, &param.name)?;
+            // Find the actual pin ID from the node instance
+            let pin_id = node.inputs.iter()
+                .find(|input| input.pin.name == param.name)
+                .map(|input| input.id.clone())
+                .ok_or_else(|| GraphyError::Custom(
+                    format!("Input pin not found for parameter '{}' on node '{}'", param.name, node.id)
+                ))?;
+
+            let arg_expr = self.generate_input_expression(&node.id, &pin_id)?;
             args.push(arg_expr);
         }
 
