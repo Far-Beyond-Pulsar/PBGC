@@ -40,7 +40,7 @@ use pbgc::compile_graph;
 
 ## Architecture
 
-Built on [Graphy](../Graphy) library with Blueprint-specific:
+Built on [Graphy](https://github.com/Far-Beyond-Pulsar/Graphy) library with Blueprint-specific:
 - pulsar_std integration
 - Rust code generation
 - Variable getter/setter handling
