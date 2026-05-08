@@ -117,14 +117,12 @@ dependencies = [
 [[package]]
 name = "graphy"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Graphy?rev=74a993fe51efc00ac5e208af74a3df79f2c0ba47#74a993fe51efc00ac5e208af74a3df79f2c0ba47"
+source = "git+https://github.com/Far-Beyond-Pulsar/Graphy?rev=0cd1d0c0e8420757f98c480ab9c4ab28e2f63ae0#0cd1d0c0e8420757f98c480ab9c4ab28e2f63ae0"
 dependencies = [
  "quote",
  "rayon",
- "rustc-hash",
  "serde",
  "serde_json",
- "smallvec",
  "syn 2.0.114",
  "thiserror",
  "tracing",
