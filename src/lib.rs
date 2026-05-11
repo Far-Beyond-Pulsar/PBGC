@@ -52,13 +52,15 @@ pub use compiler::{
 };
 
 // Re-export disk-level project scanning
-pub use disk::compile_project;
+pub use disk::{compile_project, compile_project_generated};
 
 // Re-export project generator types
 pub use project::{
+    compile_graph_to_actor_source,
     CompiledBlueprint,
     GeneratedProject,
     ProjectSpec,
+    generate_blueprint_actor_source,
     generate_project,
 };
 

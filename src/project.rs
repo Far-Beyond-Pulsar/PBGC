@@ -7,6 +7,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use graphy::{GraphDescription, GraphyError};
+
+use crate::compile_graph;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn to_snake_case(name: &str) -> String {
@@ -169,6 +173,24 @@ pub fn generate_project(spec: &ProjectSpec) -> GeneratedProject {
     GeneratedProject { files }
 }
 
+/// Compile a graph and wrap it as a generated actor source file.
+///
+/// This is the safest high-level API for callers that need runnable class code
+/// (struct + `#[derive(EngineClass)]` + `impl Actor`) instead of raw logic.
+pub fn compile_graph_to_actor_source(
+    blueprint_name: &str,
+    graph: &GraphDescription,
+) -> Result<String, GraphyError> {
+    let source = compile_graph(graph)?;
+    Ok(generate_blueprint_actor_source(blueprint_name, &source))
+}
+
+/// Wrap already compiled raw PBGC logic into a generated actor source file.
+pub fn generate_blueprint_actor_source(blueprint_name: &str, compiled_source: &str) -> String {
+    let bp = CompiledBlueprint::new(blueprint_name, compiled_source);
+    gen_blueprint_actor(&bp)
+}
+
 // ── File generators ───────────────────────────────────────────────────────────
 
 fn gen_blueprints_mod(spec: &ProjectSpec) -> String {
@@ -324,9 +346,17 @@ mod tests {
         let project = generate_project(&sample_spec());
         let actor = &project.files["src/blueprints/player_controller.rs"];
         assert!(actor.contains("pub struct PlayerController"));
+        assert!(actor.contains("#[derive(Clone, EngineClass)]"));
         assert!(actor.contains("impl Actor for PlayerController"));
         assert!(actor.contains("logic::begin_play()"));
         assert!(actor.contains("No tick event in this blueprint"));
+    }
+
+    #[test]
+    fn generate_actor_source_includes_engineclass_derive() {
+        let actor = generate_blueprint_actor_source("player_controller", "pub fn begin_play() {}\n");
+        assert!(actor.contains("pub struct PlayerController"));
+        assert!(actor.contains("#[derive(Clone, EngineClass)]"));
     }
 
     #[test]
