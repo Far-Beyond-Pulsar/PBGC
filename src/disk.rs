@@ -1,0 +1,79 @@
+//! Disk-level blueprint scanning and compilation.
+//!
+//! Walks a project root looking for `graph_save.json` files, compiles each
+//! one with PBGC, and returns the results as [`crate::project::CompiledBlueprint`]s
+//! ready to be handed to [`crate::project::generate_project`].
+
+use std::path::{Path, PathBuf};
+
+use crate::compiler::compile_graph;
+use crate::project::CompiledBlueprint;
+
+/// Compile every blueprint found under `project_root`.
+///
+/// Recurses through the directory tree looking for folders that contain a
+/// `graph_save.json` file.  Each one is compiled with PBGC.  Folders that
+/// fail to compile are logged and skipped rather than aborting the whole run.
+///
+/// Returns `Err` only if the root path cannot be read at all.
+pub fn compile_project(project_root: &Path) -> Result<Vec<CompiledBlueprint>, String> {
+    let folders = find_blueprint_folders(project_root);
+    let mut blueprints = Vec::new();
+
+    for folder in &folders {
+        match compile_blueprint_folder(folder) {
+            Ok(source) => {
+                let name = folder
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unnamed_blueprint")
+                    .to_owned();
+                blueprints.push(CompiledBlueprint::new(name, source));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[PBGC] Skipping blueprint folder {}: {}",
+                    folder.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    Ok(blueprints)
+}
+
+/// Compile a single blueprint folder that contains `graph_save.json`.
+fn compile_blueprint_folder(folder: &Path) -> Result<String, String> {
+    let graph_file = folder.join("graph_save.json");
+    let json = std::fs::read_to_string(&graph_file)
+        .map_err(|e| format!("Cannot read {}: {}", graph_file.display(), e))?;
+
+    let graph: graphy::GraphDescription = serde_json::from_str(&json)
+        .map_err(|e| format!("Cannot parse {}: {}", graph_file.display(), e))?;
+
+    compile_graph(&graph).map_err(|e| format!("Compilation error: {e}"))
+}
+
+/// Recursively find every directory that contains a `graph_save.json`.
+fn find_blueprint_folders(root: &Path) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    walk_for_blueprints(root, &mut result);
+    result
+}
+
+fn walk_for_blueprints(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.join("graph_save.json").exists() {
+                out.push(path.clone());
+            }
+            walk_for_blueprints(&path, out);
+        }
+    }
+}

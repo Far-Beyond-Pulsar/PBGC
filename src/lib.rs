@@ -38,9 +38,11 @@
 //! 4. **Execution Flow Analysis** - Map execution connections (via Graphy)
 //! 5. **Code Generation** - Generate Rust code with Blueprint-specific logic
 
-pub mod metadata;
 pub mod codegen;
 pub mod compiler;
+pub mod disk;
+pub mod metadata;
+pub mod project;
 
 // Re-export the main compilation API
 pub use compiler::{
@@ -49,14 +51,24 @@ pub use compiler::{
     compile_graph_with_variables,
 };
 
+// Re-export disk-level project scanning
+pub use disk::compile_project;
+
+// Re-export project generator types
+pub use project::{
+    CompiledBlueprint,
+    GeneratedProject,
+    ProjectSpec,
+    generate_project,
+};
+
 // Re-export Graphy types for convenience
 pub use graphy::{
     GraphDescription, NodeInstance, Connection, Pin, PinInstance,
     DataType, NodeTypes, Position, ConnectionType, PropertyValue,
     GraphMetadata, Result, GraphyError, PinType,
+    NodeMetadata, NodeMetadataProvider,
 };
-
-// Re-export TypeInfo from graphy::core
 pub use graphy::core::TypeInfo;
 
 // Re-export metadata types
