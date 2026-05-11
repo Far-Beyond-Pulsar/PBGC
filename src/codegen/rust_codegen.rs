@@ -64,7 +64,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
         code.push_str("\n");
 
         if !self.variables.is_empty() {
+            code.push_str("// PBGC_VARIABLE_STORAGE_BEGIN\n");
             code.push_str(&self.generate_variable_storage_block()?);
+            code.push_str("// PBGC_VARIABLE_STORAGE_END\n");
             code.push_str("\n");
         }
 
@@ -172,6 +174,11 @@ impl<'a> BlueprintCodeGenerator<'a> {
         // Generate function signature
         code.push_str(&format!("pub fn {}() {{\n", metadata.name));
 
+        let pure_preamble = self.generate_pure_node_preamble(1)?;
+        if !pure_preamble.is_empty() {
+            code.push_str(&pure_preamble);
+        }
+
         // Find execution output pins and follow them
         // We need to look up by pin ID (from the node instance), not pin name (from metadata)
         for output_pin in &event_node.outputs {
@@ -198,9 +205,47 @@ impl<'a> BlueprintCodeGenerator<'a> {
         Ok(code)
     }
 
+    fn generate_pure_node_preamble(&self, indent_level: usize) -> Result<String, GraphyError> {
+        let mut code = String::new();
+        let indent = "    ".repeat(indent_level);
+
+        for node_id in self.data_resolver.get_pure_evaluation_order() {
+            let Some(result_var) = self.data_resolver.get_result_variable(node_id) else {
+                continue;
+            };
+
+            let node = self
+                .graph
+                .nodes
+                .get(node_id)
+                .ok_or_else(|| GraphyError::NodeNotFound(node_id.clone()))?;
+
+            let expr = if node.node_type.starts_with("get_") {
+                let var_name = node.node_type.strip_prefix("get_").unwrap();
+                let var_type = self
+                    .variables
+                    .get(var_name)
+                    .ok_or_else(|| GraphyError::Custom(format!("Variable '{}' not found", var_name)))?;
+                let static_name = to_static_var_name(var_name);
+
+                if is_copy_type(var_type) {
+                    format!("{}.with(|v| __pbgc_get_copy(v, \"{}\"))", static_name, var_name)
+                } else {
+                    format!("{}.with(|v| __pbgc_get_clone(v, \"{}\"))", static_name, var_name)
+                }
+            } else {
+                self.generate_pure_node_expression(node)?
+            };
+
+            code.push_str(&format!("{}let {} = {};\n", indent, result_var, expr));
+        }
+
+        Ok(code)
+    }
+
     /// Generate execution chain starting from a node
     fn generate_exec_chain(&mut self, node: &NodeInstance, indent_level: usize) -> Result<String, GraphyError> {
-        let mut code = String::new();
+        let code = String::new();
 
         // Prevent infinite loops
         if self.visited.contains(&node.id) {
@@ -457,7 +502,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
         use graphy::analysis::DataSource;
 
         match self.data_resolver.get_input_source(node_id, pin_id) {
-            Some(DataSource::Connection { source_node_id, source_pin }) => {
+            Some(DataSource::Connection { source_node_id, source_pin: _ }) => {
                 let source_node = self.graph.nodes.get(source_node_id)
                     .ok_or_else(|| GraphyError::NodeNotFound(source_node_id.clone()))?;
 

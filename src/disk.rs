@@ -6,8 +6,27 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::compiler::compile_graph;
+use crate::compiler::{compile_graph, compile_graph_with_variables};
 use crate::project::{CompiledBlueprint, GeneratedProject, ProjectSpec, generate_project};
+use graphy::{DataType, GraphDescription, TypeInfo};
+use serde::Deserialize;
+use std::collections::HashMap;
+
+#[derive(Debug, Deserialize)]
+struct BlueprintAssetFile {
+    #[serde(alias = "mainGraph")]
+    main_graph: GraphDescription,
+    #[serde(default)]
+    variables: Vec<ClassVariableFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClassVariableFile {
+    name: String,
+    data_type: DataType,
+    #[serde(default)]
+    default_value: Option<String>,
+}
 
 /// Compile every blueprint found under `project_root`.
 ///
@@ -22,13 +41,8 @@ pub fn compile_project(project_root: &Path) -> Result<Vec<CompiledBlueprint>, St
 
     for folder in &folders {
         match compile_blueprint_folder(folder) {
-            Ok(source) => {
-                let name = folder
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("unnamed_blueprint")
-                    .to_owned();
-                blueprints.push(CompiledBlueprint::new(name, source));
+            Ok(compiled) => {
+                blueprints.push(compiled);
             }
             Err(e) => {
                 tracing::warn!(
@@ -66,15 +80,63 @@ pub fn compile_project_generated(project_root: &Path) -> Result<GeneratedProject
 }
 
 /// Compile a single blueprint folder that contains `graph_save.json`.
-fn compile_blueprint_folder(folder: &Path) -> Result<String, String> {
+fn compile_blueprint_folder(folder: &Path) -> Result<CompiledBlueprint, String> {
     let graph_file = folder.join("graph_save.json");
     let json = std::fs::read_to_string(&graph_file)
         .map_err(|e| format!("Cannot read {}: {}", graph_file.display(), e))?;
 
+    let blueprint_name = folder
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unnamed_blueprint")
+        .to_owned();
+
+    if let Ok(asset) = serde_json::from_str::<BlueprintAssetFile>(&json) {
+        let variables = compiled_variables(&asset.variables);
+        let source = if variables.is_empty() {
+            compile_graph(&asset.main_graph).map_err(|e| format!("Compilation error: {e}"))?
+        } else {
+            let variable_types = variables
+                .iter()
+                .map(|var| (var.name.clone(), var.rust_type.clone()))
+                .collect::<HashMap<_, _>>();
+
+            compile_graph_with_variables(&asset.main_graph, variable_types)
+                .map_err(|e| format!("Compilation error: {e}"))?
+        };
+
+        return Ok(CompiledBlueprint::new(blueprint_name, source).with_variables(variables));
+    }
+
     let graph: graphy::GraphDescription = serde_json::from_str(&json)
         .map_err(|e| format!("Cannot parse {}: {}", graph_file.display(), e))?;
 
-    compile_graph(&graph).map_err(|e| format!("Compilation error: {e}"))
+    let source = compile_graph(&graph).map_err(|e| format!("Compilation error: {e}"))?;
+    Ok(CompiledBlueprint::new(blueprint_name, source))
+}
+
+fn compiled_variables(variables: &[ClassVariableFile]) -> Vec<crate::project::CompiledVariable> {
+    variables
+        .iter()
+        .map(|var| crate::project::CompiledVariable {
+            name: var.name.clone(),
+            rust_type: rust_type_for_data_type(&var.data_type),
+            default_value: var.default_value.clone(),
+        })
+        .collect()
+}
+
+fn rust_type_for_data_type(data_type: &DataType) -> String {
+    match data_type {
+        DataType::Typed(TypeInfo { type_string }) => type_string.clone(),
+        DataType::Number => "f64".to_string(),
+        DataType::String => "String".to_string(),
+        DataType::Boolean => "bool".to_string(),
+        DataType::Vector2 => "(f32, f32)".to_string(),
+        DataType::Vector3 => "(f32, f32, f32)".to_string(),
+        DataType::Color => "(f32, f32, f32, f32)".to_string(),
+        DataType::Execution | DataType::Any => "()".to_string(),
+    }
 }
 
 /// Recursively find every directory that contains a `graph_save.json`.
