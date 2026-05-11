@@ -51,6 +51,10 @@ impl<'a> BlueprintCodeGenerator<'a> {
         code.push_str("// NOTE: Replace with actual pulsar_std import in production\n");
         code.push_str("// use pulsar_std::*;\n\n");
 
+        if !self.variables.is_empty() {
+            code.push_str("use std::cell::{Cell, RefCell};\n\n");
+        }
+
         // Collect node-specific imports
         let node_imports = self.collect_node_imports();
         for import_stmt in node_imports {
@@ -58,6 +62,11 @@ impl<'a> BlueprintCodeGenerator<'a> {
             code.push_str("\n");
         }
         code.push_str("\n");
+
+        if !self.variables.is_empty() {
+            code.push_str(&self.generate_variable_storage_block()?);
+            code.push_str("\n");
+        }
 
         // Find event nodes
         let event_nodes: Vec<_> = self.graph
@@ -102,6 +111,53 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let mut import_vec: Vec<_> = imports.into_iter().collect();
         import_vec.sort();
         import_vec
+    }
+
+    /// Generate thread-local storage and helper functions for class variables.
+    fn generate_variable_storage_block(&self) -> Result<String, GraphyError> {
+        let mut code = String::new();
+        code.push_str("thread_local! {\n");
+
+        let mut vars: Vec<_> = self.variables.iter().collect();
+        vars.sort_by(|a, b| a.0.cmp(b.0));
+
+        for (var_name, var_type) in vars {
+            let static_name = to_static_var_name(var_name);
+            if is_copy_type(var_type) {
+                code.push_str(&format!(
+                    "    static {}: Cell<Option<{}>> = Cell::new(None);\n",
+                    static_name, var_type
+                ));
+            } else {
+                code.push_str(&format!(
+                    "    static {}: RefCell<Option<{}>> = RefCell::new(None);\n",
+                    static_name, var_type
+                ));
+            }
+        }
+
+        code.push_str("}\n\n");
+        code.push_str("#[inline]\n");
+        code.push_str("fn __pbgc_set_copy<T: Copy>(slot: &Cell<Option<T>>, value: T) {\n");
+        code.push_str("    slot.set(Some(value));\n");
+        code.push_str("}\n\n");
+        code.push_str("#[inline]\n");
+        code.push_str("fn __pbgc_get_copy<T: Copy>(slot: &Cell<Option<T>>, var_name: &str) -> T {\n");
+        code.push_str("    slot.get().unwrap_or_else(|| panic!(\"PBGC variable '{}' read before assignment\", var_name))\n");
+        code.push_str("}\n\n");
+        code.push_str("#[inline]\n");
+        code.push_str("fn __pbgc_set_clone<T>(slot: &RefCell<Option<T>>, value: T) {\n");
+        code.push_str("    *slot.borrow_mut() = Some(value);\n");
+        code.push_str("}\n\n");
+        code.push_str("#[inline]\n");
+        code.push_str("fn __pbgc_get_clone<T: Clone>(slot: &RefCell<Option<T>>, var_name: &str) -> T {\n");
+        code.push_str("    slot.borrow()\n");
+        code.push_str("        .as_ref()\n");
+        code.push_str("        .cloned()\n");
+        code.push_str("        .unwrap_or_else(|| panic!(\"PBGC variable '{}' read before assignment\", var_name))\n");
+        code.push_str("}\n");
+
+        Ok(code)
     }
 
     /// Generate an event function
@@ -335,20 +391,22 @@ impl<'a> BlueprintCodeGenerator<'a> {
             .get(var_name)
             .ok_or_else(|| GraphyError::Custom(format!("Variable '{}' not found", var_name)))?;
 
+        let static_name = to_static_var_name(var_name);
+
         // Generate setter code
         let is_copy_type = is_copy_type(var_type);
         if is_copy_type {
             code.push_str(&format!(
-                "{}{}.with(|v| v.set({}));\n",
+                "{}{}.with(|v| __pbgc_set_copy(v, {}));\n",
                 indent,
-                var_name.to_uppercase(),
+                static_name,
                 value_expr
             ));
         } else {
             code.push_str(&format!(
-                "{}{}.with(|v| *v.borrow_mut() = {});\n",
+                "{}{}.with(|v| __pbgc_set_clone(v, {}));\n",
                 indent,
-                var_name.to_uppercase(),
+                static_name,
                 value_expr
             ));
         }
@@ -409,11 +467,13 @@ impl<'a> BlueprintCodeGenerator<'a> {
                     let var_type = self.variables.get(var_name)
                         .ok_or_else(|| GraphyError::Custom(format!("Variable '{}' not found", var_name)))?;
 
+                    let static_name = to_static_var_name(var_name);
+
                     let is_copy = is_copy_type(var_type);
                     return if is_copy {
-                        Ok(format!("{}.with(|v| v.get())", var_name.to_uppercase()))
+                        Ok(format!("{}.with(|v| __pbgc_get_copy(v, \"{}\"))", static_name, var_name))
                     } else {
-                        Ok(format!("{}.with(|v| v.borrow().clone())", var_name.to_uppercase()))
+                        Ok(format!("{}.with(|v| __pbgc_get_clone(v, \"{}\"))", static_name, var_name))
                     };
                 }
 
@@ -495,6 +555,24 @@ fn is_copy_type(type_str: &str) -> bool {
         "i32" | "i64" | "u32" | "u64" | "f32" | "f64" | "bool" | "char" |
         "usize" | "isize" | "i8" | "i16" | "u8" | "u16"
     )
+}
+
+fn to_static_var_name(var_name: &str) -> String {
+    let mut out = String::from("PBGC_VAR_");
+
+    for ch in var_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+
+    if out.ends_with('_') {
+        out.push('X');
+    }
+
+    out
 }
 
 /// Get default value for a data type
