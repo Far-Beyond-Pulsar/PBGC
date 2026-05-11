@@ -256,6 +256,7 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
 
 use pulsar_game::prelude::*;
 use engine_class_derive::EngineClass;
+use pulsar_std::*;
 
 #[derive(Clone, EngineClass)]
 pub struct {ty} {{}}
