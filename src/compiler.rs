@@ -141,3 +141,102 @@ pub fn compile_graph_with_variables(
 
     code_generator.generate_program()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use graphy::{Connection, ConnectionType, DataType, Pin, PinInstance, PinType, Position};
+
+    #[test]
+    fn branch_condition_from_pure_chain_allocates_temp_before_if() {
+        let mut graph = GraphDescription::new("branch_pure_chain");
+
+        let mut begin = graphy::NodeInstance::new("begin", "begin_play", Position { x: 0.0, y: 0.0 });
+        begin.outputs.push(PinInstance::new(
+            "begin_exec",
+            Pin::new("begin_exec", "Body", DataType::Execution, PinType::Output),
+        ));
+
+        let mut add = graphy::NodeInstance::new("add_node", "add", Position { x: 100.0, y: 0.0 });
+        add.inputs.push(PinInstance::new(
+            "add_a",
+            Pin::new("add_a", "a", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input),
+        ));
+        add.inputs.push(PinInstance::new(
+            "add_b",
+            Pin::new("add_b", "b", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input),
+        ));
+        add.outputs.push(PinInstance::new(
+            "add_result",
+            Pin::new("add_result", "result", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Output),
+        ));
+        add.properties.insert("add_a".to_string(), graphy::PropertyValue::Number(1.0));
+        add.properties.insert("add_b".to_string(), graphy::PropertyValue::Number(3.0));
+
+        let mut gt = graphy::NodeInstance::new("gt_node", "greater_than", Position { x: 200.0, y: 0.0 });
+        gt.inputs.push(PinInstance::new(
+            "gt_a",
+            Pin::new("gt_a", "a", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input),
+        ));
+        gt.inputs.push(PinInstance::new(
+            "gt_b",
+            Pin::new("gt_b", "b", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input),
+        ));
+        gt.outputs.push(PinInstance::new(
+            "gt_result",
+            Pin::new("gt_result", "result", DataType::Typed(graphy::TypeInfo::new("bool")), PinType::Output),
+        ));
+        gt.properties.insert("gt_b".to_string(), graphy::PropertyValue::Number(3.0));
+
+        let mut branch = graphy::NodeInstance::new("branch_node", "branch", Position { x: 300.0, y: 0.0 });
+        branch.inputs.push(PinInstance::new(
+            "branch_exec",
+            Pin::new("branch_exec", "exec", DataType::Execution, PinType::Input),
+        ));
+        branch.inputs.push(PinInstance::new(
+            "branch_condition",
+            Pin::new("branch_condition", "condition", DataType::Typed(graphy::TypeInfo::new("bool")), PinType::Input),
+        ));
+        branch.outputs.push(PinInstance::new(
+            "branch_true",
+            Pin::new("branch_true", "True", DataType::Execution, PinType::Output),
+        ));
+        branch.outputs.push(PinInstance::new(
+            "branch_false",
+            Pin::new("branch_false", "False", DataType::Execution, PinType::Output),
+        ));
+
+        graph.add_node(begin);
+        graph.add_node(add);
+        graph.add_node(gt);
+        graph.add_node(branch);
+
+        graph.add_connection(Connection::new(
+            "begin",
+            "begin_exec",
+            "branch_node",
+            "branch_exec",
+            ConnectionType::Execution,
+        ));
+        graph.add_connection(Connection::new(
+            "add_node",
+            "add_result",
+            "gt_node",
+            "gt_a",
+            ConnectionType::Data,
+        ));
+        graph.add_connection(Connection::new(
+            "gt_node",
+            "gt_result",
+            "branch_node",
+            "branch_condition",
+            ConnectionType::Data,
+        ));
+
+        let code = compile_graph(&graph).expect("branch graph should compile");
+
+        assert!(code.contains("let node_add_node_result"));
+        assert!(code.contains("let node_gt_node_result"));
+        assert!(code.contains("if node_gt_node_result"));
+    }
+}

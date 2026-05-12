@@ -161,3 +161,83 @@ fn walk_for_blueprints(dir: &Path, out: &mut Vec<PathBuf>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+        use super::*;
+
+        fn unique_temp_dir(prefix: &str) -> PathBuf {
+                let nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos();
+                std::env::temp_dir().join(format!("{}_{}", prefix, nanos))
+        }
+
+        #[test]
+        fn compile_project_reads_blueprint_asset_variables() {
+                let root = unique_temp_dir("pbgc_disk_asset_vars");
+                let class_dir = root.join("PlayerClass");
+                std::fs::create_dir_all(&class_dir).unwrap();
+
+                let graph_json = r#"{
+    "format_version": 1,
+    "main_graph": {
+        "nodes": {
+            "begin": {
+                "id": "begin",
+                "node_type": "begin_play",
+                "position": {"x": 0.0, "y": 0.0},
+                "inputs": [],
+                "outputs": [
+                    {
+                        "id": "begin_exec",
+                        "pin": {
+                            "id": "begin_exec",
+                            "name": "Body",
+                            "data_type": "Execution",
+                            "pin_type": "Output"
+                        }
+                    }
+                ],
+                "properties": {}
+            }
+        },
+        "connections": [],
+        "metadata": {
+            "name": "player_graph",
+            "description": "",
+            "version": "1.0"
+        },
+        "comments": []
+    },
+    "variables": [
+        {
+            "id": "var_1",
+            "name": "health",
+            "data_type": {"Typed": {"type_string": "f64"}},
+            "default_value": "100.0",
+            "description": ""
+        }
+    ]
+}"#;
+
+                std::fs::write(class_dir.join("graph_save.json"), graph_json).unwrap();
+
+                let compiled = compile_project(&root).unwrap();
+                assert_eq!(compiled.len(), 1);
+                assert_eq!(compiled[0].name, "PlayerClass");
+                assert_eq!(compiled[0].variables.len(), 1);
+                assert_eq!(compiled[0].variables[0].name, "health");
+
+                let generated = compile_project_generated(&root).unwrap();
+                assert!(generated
+                        .files
+                        .contains_key("src/classes/player_class/mod.rs"));
+                assert!(generated
+                        .files
+                        .contains_key("src/classes/player_class/vars/mod.rs"));
+
+                let _ = std::fs::remove_dir_all(&root);
+        }
+}

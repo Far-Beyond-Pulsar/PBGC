@@ -497,4 +497,36 @@ mod tests {
         assert!(dir.join("src/classes/enemy_ai/mod.rs").exists());
         assert!(dir.join("src/classes/enemy_ai/vars/mod.rs").exists());
     }
+
+    #[test]
+    fn variables_are_extracted_into_class_vars_module() {
+        let source = r#"
+// PBGC_VARIABLE_STORAGE_BEGIN
+thread_local! {
+    pub(super) static PBGC_VAR_HEALTH: std::cell::Cell<Option<f64>> = std::cell::Cell::new(None);
+}
+// PBGC_VARIABLE_STORAGE_END
+
+pub fn begin_play() { }
+"#;
+
+        let bp = CompiledBlueprint::new("player", source).with_variables(vec![CompiledVariable {
+            name: "health".to_string(),
+            rust_type: "f64".to_string(),
+            default_value: Some("100.0".to_string()),
+        }]);
+
+        let spec = ProjectSpec::new("game").add_blueprint(bp);
+        let project = generate_project(&spec);
+
+        let actor = &project.files["src/classes/player/mod.rs"];
+        let vars = &project.files["src/classes/player/vars/mod.rs"];
+
+        assert!(actor.contains("pub mod vars;"));
+        assert!(actor.contains("use super::vars::*;"));
+        assert!(!actor.contains("PBGC_VARIABLE_STORAGE_BEGIN"));
+        assert!(!actor.contains("thread_local!"));
+        assert!(vars.contains("thread_local!"));
+        assert!(vars.contains("PBGC_VAR_HEALTH"));
+    }
 }
