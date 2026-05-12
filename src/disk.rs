@@ -165,6 +165,7 @@ fn walk_for_blueprints(dir: &Path, out: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
         use super::*;
+    use graphy::{DataType, GraphDescription, NodeInstance, Pin, PinInstance, PinType, Position, TypeInfo};
 
         fn unique_temp_dir(prefix: &str) -> PathBuf {
                 let nanos = std::time::SystemTime::now()
@@ -180,49 +181,37 @@ mod tests {
                 let class_dir = root.join("PlayerClass");
                 std::fs::create_dir_all(&class_dir).unwrap();
 
-                let graph_json = r#"{
-    "format_version": 1,
-    "main_graph": {
-        "nodes": {
-            "begin": {
-                "id": "begin",
-                "node_type": "begin_play",
-                "position": {"x": 0.0, "y": 0.0},
-                "inputs": [],
-                "outputs": [
-                    {
-                        "id": "begin_exec",
-                        "pin": {
-                            "id": "begin_exec",
-                            "name": "Body",
-                            "data_type": "Execution",
-                            "pin_type": "Output"
-                        }
-                    }
-                ],
-                "properties": {}
-            }
-        },
-        "connections": [],
-        "metadata": {
-            "name": "player_graph",
-            "description": "",
-            "version": "1.0"
-        },
-        "comments": []
-    },
-    "variables": [
-        {
-            "id": "var_1",
-            "name": "health",
-            "data_type": {"Typed": {"type_string": "f64"}},
-            "default_value": "100.0",
-            "description": ""
-        }
-    ]
-}"#;
+                let mut graph = GraphDescription::new("player_graph");
+                let mut begin = NodeInstance::new("begin", "begin_play", Position { x: 0.0, y: 0.0 });
+                begin.outputs.push(PinInstance::new(
+                    "begin_exec",
+                    Pin::new("begin_exec", "Body", DataType::Execution, PinType::Output),
+                ));
+                graph.add_node(begin);
+                let graph_value = serde_json::to_value(&graph).unwrap();
+                let asset_value = serde_json::json!({
+                        "format_version": 1,
+                        "mainGraph": graph_value,
+                        "variables": [
+                                {
+                                        "id": "var_1",
+                                        "name": "health",
+                                        "data_type": graphy::DataType::Typed(TypeInfo::new("f64")),
+                                        "default_value": "100.0",
+                                        "description": ""
+                                }
+                        ]
+                });
 
-                std::fs::write(class_dir.join("graph_save.json"), graph_json).unwrap();
+                std::fs::write(
+                        class_dir.join("graph_save.json"),
+                        serde_json::to_string_pretty(&asset_value).unwrap(),
+                )
+                .unwrap();
+
+                let compiled_single = compile_blueprint_folder(&class_dir).unwrap();
+                assert_eq!(compiled_single.variables.len(), 1);
+                assert_eq!(compiled_single.variables[0].name, "health");
 
                 let compiled = compile_project(&root).unwrap();
                 assert_eq!(compiled.len(), 1);

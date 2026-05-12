@@ -210,6 +210,10 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let indent = "    ".repeat(indent_level);
 
         for node_id in self.data_resolver.get_pure_evaluation_order() {
+            if !self.should_materialize_pure_result(node_id) {
+                continue;
+            }
+
             let Some(result_var) = self.data_resolver.get_result_variable(node_id) else {
                 continue;
             };
@@ -241,6 +245,29 @@ impl<'a> BlueprintCodeGenerator<'a> {
         }
 
         Ok(code)
+    }
+
+    fn should_materialize_pure_result(&self, source_node_id: &str) -> bool {
+        self.pure_result_use_count(source_node_id) > 1
+    }
+
+    fn pure_result_use_count(&self, source_node_id: &str) -> usize {
+        use graphy::analysis::DataSource;
+
+        let mut count = 0usize;
+        for (consumer_id, node) in &self.graph.nodes {
+            for input in &node.inputs {
+                if let Some(DataSource::Connection { source_node_id: sid, .. }) =
+                    self.data_resolver.get_input_source(consumer_id, &input.id)
+                {
+                    if sid == source_node_id {
+                        count += 1;
+                    }
+                }
+            }
+        }
+
+        count
     }
 
     /// Generate execution chain starting from a node
@@ -522,9 +549,15 @@ impl<'a> BlueprintCodeGenerator<'a> {
                     };
                 }
 
-                // Check if source is pure - if so, inline it
+                // Check if source is pure. Prefer precomputed temporary results
+                // to avoid duplicating pure function calls across downstream uses.
                 if let Some(node_meta) = self.metadata_provider.get_node_metadata(&source_node.node_type) {
                     if node_meta.node_type == NodeTypes::pure {
+                        if self.should_materialize_pure_result(source_node_id) {
+                            if let Some(var_name) = self.data_resolver.get_result_variable(source_node_id) {
+                                return Ok(var_name.clone());
+                            }
+                        }
                         return self.generate_pure_node_expression(source_node);
                     }
                 }

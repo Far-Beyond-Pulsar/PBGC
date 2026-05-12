@@ -146,9 +146,10 @@ pub fn compile_graph_with_variables(
 mod tests {
     use super::*;
     use graphy::{Connection, ConnectionType, DataType, Pin, PinInstance, PinType, Position};
+    use std::collections::HashSet;
 
     #[test]
-    fn branch_condition_from_pure_chain_allocates_temp_before_if() {
+    fn branch_condition_from_pure_chain_inlines_single_use_pure_nodes() {
         let mut graph = GraphDescription::new("branch_pure_chain");
 
         let mut begin = graphy::NodeInstance::new("begin", "begin_play", Position { x: 0.0, y: 0.0 });
@@ -235,8 +236,38 @@ mod tests {
 
         let code = compile_graph(&graph).expect("branch graph should compile");
 
-        assert!(code.contains("let node_add_node_result"));
-        assert!(code.contains("let node_gt_node_result"));
-        assert!(code.contains("if node_gt_node_result"));
+        assert!(!code.contains("let node_add_node_result"));
+        assert!(!code.contains("let node_gt_node_result"));
+        assert!(code.contains("if greater_than"));
+
+        let mut declared = HashSet::new();
+        for line in code.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("let ") {
+                if let Some(ident) = rest.split_whitespace().next() {
+                    let ident = ident.trim_end_matches('=');
+                    declared.insert(ident.to_string());
+                }
+            }
+        }
+
+        for line in code.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("if ") {
+                let cond_ident = rest
+                    .split(|c: char| c.is_whitespace() || c == '{' || c == '(')
+                    .next()
+                    .unwrap_or("");
+
+                if cond_ident.starts_with("node_") && cond_ident.ends_with("_result") {
+                    assert!(
+                        declared.contains(cond_ident),
+                        "branch condition references undeclared temporary: {}\nGenerated code:\n{}",
+                        cond_ident,
+                        code
+                    );
+                }
+            }
+        }
     }
 }
