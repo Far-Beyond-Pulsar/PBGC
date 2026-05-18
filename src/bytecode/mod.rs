@@ -14,14 +14,13 @@ pub enum Instruction {
     LoadI32 { slot: SlotId, value: i32 },
     LoadF32 { slot: SlotId, value: f32 },
 
-    /// Direct function call — no dispatch table, no lookup.
+    /// Direct function call through a `__bp_dispatch_<name>` shim.
     ///
-    /// `fn_ptr` is the address of `__bp_dispatch_<name>` in the native cdylib,
-    /// patched once into the program by the executor before execution.
-    /// The VM transmutes it and calls it directly — one pointer dereference.
+    /// `fn_ptr` holds the address of the shim symbol resolved by `BpExecutor::prepare`.
+    /// The shim was generated at compile time by `#[blueprint]` and already encodes
+    /// all type knowledge — the VM calls it with raw u64 slots, no type dispatch.
     ///
-    /// `node_type` is kept only for human-readable debug output and
-    /// serde roundtrip; the VM never reads it.
+    /// `node_type` is kept only for human-readable error messages; the VM never reads it.
     Call {
         fn_ptr:    u64,
         node_type: String,
