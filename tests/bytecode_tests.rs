@@ -61,6 +61,53 @@ impl NodeDispatch for MockDispatch {
                 *output = Some(BpValue::Float(v.clamp(lo, hi)));
             }
             "print_string" => {}
+            // ── assert nodes ──────────────────────────────────────────────────
+            "assert_true" => {
+                if !inputs[0].as_bool() {
+                    return Err(VmError::AssertionFailed("assert_true: condition was false".into()));
+                }
+            }
+            "assert_false" => {
+                if inputs[0].as_bool() {
+                    return Err(VmError::AssertionFailed("assert_false: condition was true".into()));
+                }
+            }
+            "assert_eq_int" => {
+                let (a, b) = (inputs[0].as_i64().unwrap_or(0), inputs[1].as_i64().unwrap_or(0));
+                if a != b {
+                    return Err(VmError::AssertionFailed(format!("assert_eq_int: {} != {}", a, b)));
+                }
+            }
+            "assert_ne_int" => {
+                let (a, b) = (inputs[0].as_i64().unwrap_or(0), inputs[1].as_i64().unwrap_or(0));
+                if a == b {
+                    return Err(VmError::AssertionFailed(format!("assert_ne_int: both == {}", a)));
+                }
+            }
+            "assert_eq_float" => {
+                let (a, b, eps) = (inputs[0].as_f64().unwrap_or(0.0), inputs[1].as_f64().unwrap_or(0.0), inputs[2].as_f64().unwrap_or(1e-9));
+                if (a - b).abs() >= eps {
+                    return Err(VmError::AssertionFailed(format!("assert_eq_float: |{} - {}| = {} >= eps {}", a, b, (a-b).abs(), eps)));
+                }
+            }
+            "assert_gt_int" => {
+                let (a, b) = (inputs[0].as_i64().unwrap_or(0), inputs[1].as_i64().unwrap_or(0));
+                if a <= b {
+                    return Err(VmError::AssertionFailed(format!("assert_gt_int: {} is not > {}", a, b)));
+                }
+            }
+            "assert_lt_int" => {
+                let (a, b) = (inputs[0].as_i64().unwrap_or(0), inputs[1].as_i64().unwrap_or(0));
+                if a >= b {
+                    return Err(VmError::AssertionFailed(format!("assert_lt_int: {} is not < {}", a, b)));
+                }
+            }
+            "assert_in_range_int" => {
+                let (v, lo, hi) = (inputs[0].as_i64().unwrap_or(0), inputs[1].as_i64().unwrap_or(0), inputs[2].as_i64().unwrap_or(0));
+                if v < lo || v > hi {
+                    return Err(VmError::AssertionFailed(format!("assert_in_range_int: {} not in [{}, {}]", v, lo, hi)));
+                }
+            }
             other => return Err(VmError::UnknownNode(other.to_string())),
         }
         Ok(())
@@ -147,6 +194,92 @@ fn make_print_node(id: &str) -> NodeInstance {
         &format!("{}_exec_out", id),
         Pin::new(&format!("{}_exec_out", id), "exec", DataType::Execution, PinType::Output),
     ));
+    n
+}
+
+/// Build an `assert_eq_int` fn_ node: exec in, two i64 data inputs, exec out.
+fn make_assert_eq_int_node(id: &str, const_expected: Option<i64>) -> NodeInstance {
+    let mut n = NodeInstance::new(id, "assert_eq_int", Position { x: 500.0, y: 0.0 });
+    n.inputs.push(PinInstance::new(
+        &format!("{}_exec", id),
+        Pin::new(&format!("{}_exec", id), "exec", DataType::Execution, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{}_actual", id),
+        Pin::new(&format!("{}_actual", id), "actual", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{}_expected", id),
+        Pin::new(&format!("{}_expected", id), "expected", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{}_exec_out", id),
+        Pin::new(&format!("{}_exec_out", id), "exec", DataType::Execution, PinType::Output),
+    ));
+    if let Some(v) = const_expected {
+        n.properties.insert(format!("{}_expected", id), PropertyValue::Number(v as f64));
+    }
+    n
+}
+
+fn make_assert_eq_float_node(id: &str, const_expected: Option<f64>, const_epsilon: Option<f64>) -> NodeInstance {
+    let mut n = NodeInstance::new(id, "assert_eq_float", Position { x: 500.0, y: 0.0 });
+    n.inputs.push(PinInstance::new(
+        &format!("{}_exec", id),
+        Pin::new(&format!("{}_exec", id), "exec", DataType::Execution, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{}_actual", id),
+        Pin::new(&format!("{}_actual", id), "actual", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{}_expected", id),
+        Pin::new(&format!("{}_expected", id), "expected", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{}_epsilon", id),
+        Pin::new(&format!("{}_epsilon", id), "epsilon", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{}_exec_out", id),
+        Pin::new(&format!("{}_exec_out", id), "exec", DataType::Execution, PinType::Output),
+    ));
+    if let Some(v) = const_expected { n.properties.insert(format!("{}_expected", id), PropertyValue::Number(v)); }
+    if let Some(v) = const_epsilon  { n.properties.insert(format!("{}_epsilon", id), PropertyValue::Number(v)); }
+    n
+}
+
+fn make_assert_true_node(id: &str) -> NodeInstance {
+    let mut n = NodeInstance::new(id, "assert_true", Position { x: 500.0, y: 0.0 });
+    n.inputs.push(PinInstance::new(
+        &format!("{}_exec", id),
+        Pin::new(&format!("{}_exec", id), "exec", DataType::Execution, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{}_condition", id),
+        Pin::new(&format!("{}_condition", id), "condition", DataType::Typed(graphy::TypeInfo::new("bool")), PinType::Input),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{}_exec_out", id),
+        Pin::new(&format!("{}_exec_out", id), "exec", DataType::Execution, PinType::Output),
+    ));
+    n
+}
+
+fn make_multiply_node(id: &str) -> NodeInstance {
+    let mut n = NodeInstance::new(id, "multiply", Position { x: 100.0, y: 0.0 });
+    n.inputs.push(PinInstance::new(&format!("{}_a", id), Pin::new(&format!("{}_a", id), "a", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{}_b", id), Pin::new(&format!("{}_b", id), "b", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
+    n.outputs.push(PinInstance::new(&format!("{}_result", id), Pin::new(&format!("{}_result", id), "result", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Output)));
+    n
+}
+
+fn make_lerp_node(id: &str) -> NodeInstance {
+    let mut n = NodeInstance::new(id, "lerp", Position { x: 100.0, y: 0.0 });
+    n.inputs.push(PinInstance::new(&format!("{}_a", id), Pin::new(&format!("{}_a", id), "a", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{}_b", id), Pin::new(&format!("{}_b", id), "b", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{}_t", id), Pin::new(&format!("{}_t", id), "t", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
+    n.outputs.push(PinInstance::new(&format!("{}_result", id), Pin::new(&format!("{}_result", id), "result", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Output)));
     n
 }
 
@@ -570,4 +703,315 @@ fn test_parse_bp_const_numbers() {
     assert_eq!(parse_bp_const("true"), BpValue::Bool(true));
     assert_eq!(parse_bp_const("false"), BpValue::Bool(false));
     assert_eq!(parse_bp_const("\"hello\""), BpValue::Str("hello".to_string()));
+}
+
+// ── Correctness tests (self-asserting graphs) ─────────────────────────────────
+//
+// Each test builds a Blueprint graph that computes a result and wires it into
+// an assert_eq_* node in the exec chain. If the VM executes the assert node
+// and the value is wrong, the dispatch returns VmError::AssertionFailed and the
+// Rust test fails with a descriptive message.
+
+fn run_assert_graph(graph: &GraphDescription) {
+    let programs = compile_graph_to_bytecode(graph)
+        .expect("graph should compile to bytecode");
+    let dispatch = MockDispatch::new();
+    let vm = BytecodeVm::new(&dispatch);
+    for prog in &programs {
+        vm.run(prog).unwrap_or_else(|e| panic!("VM assertion failed: {}", e));
+    }
+}
+
+// ── Basic arithmetic ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_correctness_add_3_plus_4_equals_7() {
+    // add(3, 4) → assert_eq_int(7)
+    let mut g = GraphDescription::new("add_correct");
+    let begin = make_begin_play_node("be");
+
+    let mut add = make_add_node("a");
+    add.properties.insert("a_a".into(), PropertyValue::Number(3.0));
+    add.properties.insert("a_b".into(), PropertyValue::Number(4.0));
+
+    let assert = make_assert_eq_int_node("chk", Some(7));
+
+    g.add_node(begin);
+    g.add_node(add);
+    g.add_node(assert);
+    g.add_connection(Connection::new("begin", "be", "chk", "chk_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("a", "a_result", "chk", "chk_actual", ConnectionType::Data));
+
+    run_assert_graph(&g);
+}
+
+#[test]
+fn test_correctness_multiply_6_times_7_equals_42() {
+    let mut g = GraphDescription::new("multiply_correct");
+    let begin = make_begin_play_node("be");
+
+    let mut mul = make_multiply_node("m");
+    mul.properties.insert("m_a".into(), PropertyValue::Number(6.0));
+    mul.properties.insert("m_b".into(), PropertyValue::Number(7.0));
+
+    let assert = make_assert_eq_int_node("chk", Some(42));
+
+    g.add_node(begin);
+    g.add_node(mul);
+    g.add_node(assert);
+    g.add_connection(Connection::new("begin", "be", "chk", "chk_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("m", "m_result", "chk", "chk_actual", ConnectionType::Data));
+
+    run_assert_graph(&g);
+}
+
+#[test]
+fn test_correctness_add_chain_0_plus_1_times_100_equals_100() {
+    // Chain 100 add-by-1 nodes: result should be 100
+    let mut g = GraphDescription::new("add_chain");
+    let begin = make_begin_play_node("be");
+    g.add_node(begin);
+
+    for i in 0..100usize {
+        let id = format!("a{}", i);
+        let mut node = make_add_node(&id);
+        node.properties.insert(format!("{}_b", id), PropertyValue::Number(1.0));
+        if i == 0 {
+            node.properties.insert(format!("{}_a", id), PropertyValue::Number(0.0));
+        } else {
+            let prev = format!("a{}", i - 1);
+            g.add_connection(Connection::new(&prev, &format!("{}_result", prev), &id, &format!("{}_a", id), ConnectionType::Data));
+        }
+        g.add_node(node);
+    }
+
+    let assert = make_assert_eq_int_node("chk", Some(100));
+    g.add_node(assert);
+    g.add_connection(Connection::new("begin", "be", "chk", "chk_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("a99", "a99_result", "chk", "chk_actual", ConnectionType::Data));
+
+    run_assert_graph(&g);
+}
+
+// ── Floating-point math ───────────────────────────────────────────────────────
+
+#[test]
+fn test_correctness_lerp_midpoint() {
+    // lerp(0, 100, 0.5) == 50.0
+    let mut g = GraphDescription::new("lerp_mid");
+    let begin = make_begin_play_node("be");
+
+    let mut lerp = make_lerp_node("l");
+    lerp.properties.insert("l_a".into(), PropertyValue::Number(0.0));
+    lerp.properties.insert("l_b".into(), PropertyValue::Number(100.0));
+    lerp.properties.insert("l_t".into(), PropertyValue::Number(0.5));
+
+    let assert = make_assert_eq_float_node("chk", Some(50.0), Some(1e-9));
+
+    g.add_node(begin);
+    g.add_node(lerp);
+    g.add_node(assert);
+    g.add_connection(Connection::new("begin", "be", "chk", "chk_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("l", "l_result", "chk", "chk_actual", ConnectionType::Data));
+
+    run_assert_graph(&g);
+}
+
+#[test]
+fn test_correctness_lerp_at_zero_equals_a() {
+    // lerp(42.0, 100.0, 0.0) == 42.0
+    let mut g = GraphDescription::new("lerp_zero");
+    let begin = make_begin_play_node("be");
+
+    let mut lerp = make_lerp_node("l");
+    lerp.properties.insert("l_a".into(), PropertyValue::Number(42.0));
+    lerp.properties.insert("l_b".into(), PropertyValue::Number(100.0));
+    lerp.properties.insert("l_t".into(), PropertyValue::Number(0.0));
+
+    let assert = make_assert_eq_float_node("chk", Some(42.0), Some(1e-9));
+
+    g.add_node(begin);
+    g.add_node(lerp);
+    g.add_node(assert);
+    g.add_connection(Connection::new("begin", "be", "chk", "chk_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("l", "l_result", "chk", "chk_actual", ConnectionType::Data));
+
+    run_assert_graph(&g);
+}
+
+// ── Control flow correctness ──────────────────────────────────────────────────
+
+#[test]
+fn test_correctness_branch_true_path_asserts_true() {
+    // 10 > 5 == true → branch.True → assert_true(true)
+    // if branch takes the wrong path this test either fails the assert or
+    // doesn't reach it (no assertion fires on the false path).
+    let mut g = GraphDescription::new("branch_true_path");
+    let begin = make_begin_play_node("be");
+
+    let mut gt = make_greater_than_node("gt");
+    gt.properties.insert("gt_a".into(), PropertyValue::Number(10.0));
+    gt.properties.insert("gt_b".into(), PropertyValue::Number(5.0));
+
+    let branch = make_branch_node("br");
+
+    // True path: assert that condition was true
+    let assert_t = make_assert_true_node("chk_t");
+    assert_t.inputs.iter().find(|p| p.pin.name == "condition").unwrap(); // sanity
+
+    // False path: we'd never reach this in a correct run, but add it anyway
+    // with an assert_false that would fail if the wrong path fires.
+    let mut false_assert = NodeInstance::new("chk_f", "assert_false", Position { x: 500.0, y: 100.0 });
+    false_assert.inputs.push(PinInstance::new("chk_f_exec", Pin::new("chk_f_exec", "exec", DataType::Execution, PinType::Input)));
+    false_assert.inputs.push(PinInstance::new("chk_f_cond", Pin::new("chk_f_cond", "condition", DataType::Typed(graphy::TypeInfo::new("bool")), PinType::Input)));
+    false_assert.properties.insert("chk_f_cond".into(), PropertyValue::Number(1.0)); // always true → assert_false would fire
+    false_assert.outputs.push(PinInstance::new("chk_f_out", Pin::new("chk_f_out", "exec", DataType::Execution, PinType::Output)));
+
+    g.add_node(begin);
+    g.add_node(gt);
+    g.add_node(branch);
+    g.add_node(assert_t);
+    g.add_node(false_assert);
+
+    g.add_connection(Connection::new("begin", "be", "br", "br_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("gt", "gt_result", "br", "br_condition", ConnectionType::Data));
+    g.add_connection(Connection::new("br", "br_true", "chk_t", "chk_t_exec", ConnectionType::Execution));
+    // The condition pin on assert_true: connect gt result so it asserts the condition is true
+    g.add_connection(Connection::new("gt", "gt_result", "chk_t", "chk_t_condition", ConnectionType::Data));
+    // False branch would fire assert_false with a constant-true input → would fail
+    g.add_connection(Connection::new("br", "br_false", "chk_f", "chk_f_exec", ConnectionType::Execution));
+
+    run_assert_graph(&g);
+}
+
+#[test]
+fn test_correctness_assert_fails_on_wrong_value() {
+    // add(1, 1) == 3 is WRONG — this test verifies the assertion mechanism itself
+    // catches it and the VM returns an error.
+    let mut g = GraphDescription::new("wrong_assert");
+    let begin = make_begin_play_node("be");
+
+    let mut add = make_add_node("a");
+    add.properties.insert("a_a".into(), PropertyValue::Number(1.0));
+    add.properties.insert("a_b".into(), PropertyValue::Number(1.0));
+
+    let assert = make_assert_eq_int_node("chk", Some(3)); // WRONG: 1+1 = 2, not 3
+
+    g.add_node(begin);
+    g.add_node(add);
+    g.add_node(assert);
+    g.add_connection(Connection::new("begin", "be", "chk", "chk_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("a", "a_result", "chk", "chk_actual", ConnectionType::Data));
+
+    let programs = compile_graph_to_bytecode(&g).expect("should compile");
+    let dispatch = MockDispatch::new();
+    let vm = BytecodeVm::new(&dispatch);
+    let result = vm.run(&programs[0]);
+
+    assert!(
+        matches!(result, Err(VmError::AssertionFailed(_))),
+        "expected AssertionFailed, got {:?}",
+        result
+    );
+}
+
+// ── Multi-step compound calculations ─────────────────────────────────────────
+
+#[test]
+fn test_correctness_pythagorean_triple_3_4_5() {
+    // 3² + 4² = 9 + 16 = 25 → assert_eq_int(25)
+    let mut g = GraphDescription::new("pythag");
+    let begin = make_begin_play_node("be");
+
+    let mut sq3 = make_multiply_node("sq3");
+    sq3.properties.insert("sq3_a".into(), PropertyValue::Number(3.0));
+    sq3.properties.insert("sq3_b".into(), PropertyValue::Number(3.0));
+
+    let mut sq4 = make_multiply_node("sq4");
+    sq4.properties.insert("sq4_a".into(), PropertyValue::Number(4.0));
+    sq4.properties.insert("sq4_b".into(), PropertyValue::Number(4.0));
+
+    let mut sum = make_add_node("sum");
+    let assert = make_assert_eq_int_node("chk", Some(25));
+
+    g.add_node(begin);
+    g.add_node(sq3);
+    g.add_node(sq4);
+    g.add_node(sum);
+    g.add_node(assert);
+
+    g.add_connection(Connection::new("sq3", "sq3_result", "sum", "sum_a", ConnectionType::Data));
+    g.add_connection(Connection::new("sq4", "sq4_result", "sum", "sum_b", ConnectionType::Data));
+    g.add_connection(Connection::new("begin", "be", "chk", "chk_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("sum", "sum_result", "chk", "chk_actual", ConnectionType::Data));
+
+    run_assert_graph(&g);
+}
+
+#[test]
+fn test_correctness_add_is_commutative() {
+    // add(a, b) == add(b, a) for a=7, b=13
+    // We verify both sides equal 20.
+    let mut g = GraphDescription::new("commutative");
+    let begin = make_begin_play_node("be");
+
+    let mut ab = make_add_node("ab");
+    ab.properties.insert("ab_a".into(), PropertyValue::Number(7.0));
+    ab.properties.insert("ab_b".into(), PropertyValue::Number(13.0));
+
+    let mut ba = make_add_node("ba");
+    ba.properties.insert("ba_a".into(), PropertyValue::Number(13.0));
+    ba.properties.insert("ba_b".into(), PropertyValue::Number(7.0));
+
+    let assert_ab = make_assert_eq_int_node("chk_ab", Some(20));
+    let mut assert_ba = make_assert_eq_int_node("chk_ba", Some(20));
+    // chain: begin → chk_ab → chk_ba
+    assert_ba.inputs.iter_mut().find(|p| p.pin.name == "exec").unwrap();
+
+    g.add_node(begin);
+    g.add_node(ab);
+    g.add_node(ba);
+    g.add_node(assert_ab);
+    g.add_node(assert_ba);
+
+    g.add_connection(Connection::new("begin", "be", "chk_ab", "chk_ab_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("chk_ab", "chk_ab_exec_out", "chk_ba", "chk_ba_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("ab", "ab_result", "chk_ab", "chk_ab_actual", ConnectionType::Data));
+    g.add_connection(Connection::new("ba", "ba_result", "chk_ba", "chk_ba_actual", ConnectionType::Data));
+
+    run_assert_graph(&g);
+}
+
+#[test]
+fn test_correctness_greater_than_is_antisymmetric() {
+    // 10 > 5 is true, 5 > 10 is false
+    let mut g = GraphDescription::new("gt_antisymmetric");
+    let begin = make_begin_play_node("be");
+
+    let mut gt_10_5 = make_greater_than_node("gt1");
+    gt_10_5.properties.insert("gt1_a".into(), PropertyValue::Number(10.0));
+    gt_10_5.properties.insert("gt1_b".into(), PropertyValue::Number(5.0));
+
+    let mut gt_5_10 = make_greater_than_node("gt2");
+    gt_5_10.properties.insert("gt2_a".into(), PropertyValue::Number(5.0));
+    gt_5_10.properties.insert("gt2_b".into(), PropertyValue::Number(10.0));
+
+    let assert_true_node = make_assert_true_node("chk1");  // 10>5 == true
+    let mut assert_false_node = NodeInstance::new("chk2", "assert_false", Position { x: 600.0, y: 0.0 });
+    assert_false_node.inputs.push(PinInstance::new("chk2_exec", Pin::new("chk2_exec", "exec", DataType::Execution, PinType::Input)));
+    assert_false_node.inputs.push(PinInstance::new("chk2_cond", Pin::new("chk2_cond", "condition", DataType::Typed(graphy::TypeInfo::new("bool")), PinType::Input)));
+    assert_false_node.outputs.push(PinInstance::new("chk2_out", Pin::new("chk2_out", "exec", DataType::Execution, PinType::Output)));
+
+    g.add_node(begin);
+    g.add_node(gt_10_5);
+    g.add_node(gt_5_10);
+    g.add_node(assert_true_node);
+    g.add_node(assert_false_node);
+
+    g.add_connection(Connection::new("begin", "be", "chk1", "chk1_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("chk1", "chk1_exec_out", "chk2", "chk2_exec", ConnectionType::Execution));
+    g.add_connection(Connection::new("gt1", "gt1_result", "chk1", "chk1_condition", ConnectionType::Data));
+    g.add_connection(Connection::new("gt2", "gt2_result", "chk2", "chk2_cond", ConnectionType::Data));
+
+    run_assert_graph(&g);
 }

@@ -9,6 +9,8 @@ pub enum VmError {
     LabelNotFound(LabelId),
     DispatchError(String),
     TypeMismatch { expected: &'static str, got: &'static str },
+    /// An assert_* node fired and its condition was not met.
+    AssertionFailed(String),
 }
 
 impl std::fmt::Display for VmError {
@@ -21,6 +23,7 @@ impl std::fmt::Display for VmError {
             VmError::TypeMismatch { expected, got } => {
                 write!(f, "Type mismatch: expected {}, got {}", expected, got)
             }
+            VmError::AssertionFailed(msg) => write!(f, "Assertion failed: {}", msg),
         }
     }
 }
@@ -104,7 +107,11 @@ impl<'d, D: NodeDispatch> BytecodeVm<'d, D> {
                     call_output = None;
                     self.dispatch
                         .call(node_type, &args, &mut call_output)
-                        .map_err(|e| VmError::DispatchError(format!("{}: {}", node_type, e)))?;
+                        .map_err(|e| match e {
+                            // Assertion failures surface as-is for clean error messages
+                            VmError::AssertionFailed(_) => e,
+                            other => VmError::DispatchError(format!("{}: {}", node_type, other)),
+                        })?;
 
                     if let Some(out_slot) = output {
                         set_slot(&mut slots, *out_slot, call_output.take().unwrap_or(BpValue::Null))?;
