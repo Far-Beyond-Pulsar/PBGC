@@ -111,12 +111,7 @@ impl<'a> BytecodeCodegen<'a> {
                 Some(s)
             } else { None };
 
-            self.instructions.push(Instruction::Call {
-                fn_ptr: 0,
-                node_type: meta.name.to_string(),
-                inputs: input_slots,
-                output: output_slot,
-            });
+            self.instructions.push(Instruction::Call { fn_ptr: 0, node_type: meta.name.to_string(), inputs: input_slots, output: output_slot });
         }
         Ok(())
     }
@@ -147,12 +142,7 @@ impl<'a> BytecodeCodegen<'a> {
             Some(s)
         } else { None };
 
-        self.instructions.push(Instruction::Call {
-            fn_ptr: 0,
-            node_type: meta.name.to_string(),
-            inputs,
-            output,
-        });
+        self.instructions.push(Instruction::Call { fn_ptr: 0, node_type: meta.name.to_string(), inputs, output });
         self.follow_exec_outputs(node)
     }
 
@@ -165,13 +155,7 @@ impl<'a> BytecodeCodegen<'a> {
         let val_slot = self.resolve_input_slot(&node.id, &val_pin.id)?;
 
         let setter_name = format!("set_{}", var_name);
-
-        self.instructions.push(Instruction::Call {
-            fn_ptr: 0,
-            node_type: setter_name,
-            inputs: vec![val_slot],
-            output: None,
-        });
+        self.instructions.push(Instruction::Call { fn_ptr: 0, node_type: setter_name, inputs: vec![val_slot], output: None });
         self.follow_exec_outputs(node)
     }
 

@@ -58,11 +58,14 @@ pub fn run(program: &BpProgram) -> Result<(), VmError> {
                 for (i, &s) in inputs.iter().enumerate() {
                     scratch[i] = slots[s as usize];
                 }
-                let mut out_val = 0u64;
-                let f: DispatchFn = unsafe { std::mem::transmute(*fn_ptr) };
-                unsafe { f(scratch.as_ptr(), &mut out_val) };
+                let mut result = 0u64;
+                // SAFETY: fn_ptr was resolved from the native cdylib by the executor.
+                unsafe {
+                    let f: DispatchFn = std::mem::transmute(*fn_ptr);
+                    f(scratch.as_ptr(), &mut result);
+                }
                 if let Some(out) = output {
-                    slots[*out as usize] = out_val;
+                    slots[*out as usize] = result;
                 }
             }
 
@@ -82,7 +85,6 @@ pub fn run(program: &BpProgram) -> Result<(), VmError> {
     }
     Ok(())
 }
-
 
 fn build_labels(instructions: &[Instruction]) -> HashMap<LabelId, usize> {
     instructions.iter().enumerate()
