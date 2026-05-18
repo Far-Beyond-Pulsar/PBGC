@@ -1,4 +1,4 @@
-use crate::bytecode::{BpProgram, Instruction, LabelId};
+use crate::bytecode::{BpProgram, Instruction, LabelId, TypeSlot};
 use std::collections::HashMap;
 
 #[derive(Debug)]
@@ -19,9 +19,16 @@ impl std::error::Error for VmError {}
 
 /// ABI of every `__bp_dispatch_<name>` symbol.
 ///
-/// `args` is an array of pointers into the byte arena, one per input.
-/// `ret` points to the output region in the arena (null for void functions).
-pub type DispatchFn = unsafe extern "C" fn(args: *const *const u8, ret: *mut u8);
+/// `args`       — array of pointers into the byte arena, one per input.
+/// `ret`        — pointer to the output region in the arena (null for void).
+/// `type_slots` — array of `TypeSlot` values resolved at graph-compile time,
+///                one per generic type parameter `T`.  Concrete functions
+///                receive this pointer but must not read it (pass null/empty).
+pub type DispatchFn = unsafe extern "C" fn(
+    args:       *const *const u8,
+    ret:        *mut u8,
+    type_slots: *const TypeSlot,
+);
 
 /// Execute a prepared `BpProgram`.
 ///
@@ -34,7 +41,10 @@ pub fn run(program: &BpProgram) -> Result<(), VmError> {
     let base = arena.as_mut_ptr() as *mut u8;
 
     // Pre-allocate the argument-pointer scratch buffer once to avoid heap churn.
-    let mut arg_ptrs: Vec<*const u8> = Vec::with_capacity(program.max_args_count.max(1));
+    let mut arg_ptrs:      Vec<*const u8>  = Vec::with_capacity(program.max_args_count.max(1));
+    // Scratch buffer: TypeSlot values collected contiguously for each generic Call.
+    // Generic dispatch functions receive `*const TypeSlot` into this buffer.
+    let mut type_slots_buf: Vec<TypeSlot>  = Vec::new();
 
     let labels = build_labels(&program.instructions);
     let mut pc = 0usize;
@@ -52,7 +62,18 @@ pub fn run(program: &BpProgram) -> Result<(), VmError> {
                 pc += 1;
             }
 
-            Instruction::Call { fn_ptr, node_type, input_offsets, output_offset, has_output } => {
+            Instruction::InitTypeSlot { offset, size, align } => {
+                // Write a TypeSlot { size, align } into the arena at *offset*.
+                // SAFETY: the codegen guarantees offset + sizeof(TypeSlot) <= arena_size
+                // and that the slot is 8-byte aligned.
+                unsafe {
+                    let slot_ptr = base.add(*offset) as *mut TypeSlot;
+                    std::ptr::write(slot_ptr, TypeSlot { size: *size, align: *align });
+                }
+                pc += 1;
+            }
+
+            Instruction::Call { fn_ptr, node_type, input_offsets, output_offset, has_output, type_slot_offsets } => {
                 if *fn_ptr == 0 {
                     return Err(VmError::UnresolvedCall(node_type.clone()));
                 }
@@ -61,11 +82,25 @@ pub fn run(program: &BpProgram) -> Result<(), VmError> {
                     // SAFETY: offset is within the arena (guaranteed by codegen).
                     unsafe { arg_ptrs.push(base.add(off)); }
                 }
+                // Collect TypeSlot values into a contiguous scratch buffer so that
+                // generic dispatch functions can index them as type_slots[i].
+                type_slots_buf.clear();
+                for &off in type_slot_offsets {
+                    unsafe {
+                        type_slots_buf.push(*(base.add(off) as *const TypeSlot));
+                    }
+                }
                 unsafe {
                     let ret = if *has_output { base.add(*output_offset) } else { std::ptr::null_mut() };
+                    // Null when there are no type slots (concrete functions).
+                    let ts_ptr = if type_slots_buf.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        type_slots_buf.as_ptr()
+                    };
                     // SAFETY: fn_ptr was resolved from the cdylib by the executor.
                     let f: DispatchFn = std::mem::transmute(*fn_ptr);
-                    f(arg_ptrs.as_ptr(), ret);
+                    f(arg_ptrs.as_ptr(), ret, ts_ptr);
                 }
                 pc += 1;
             }

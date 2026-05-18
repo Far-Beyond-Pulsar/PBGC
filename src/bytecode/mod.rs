@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+// Re-export from pulsar_std so that callers only need one import.
+pub use pulsar_std::TypeSlot;
 
 pub type LabelId = usize;
 
@@ -12,6 +14,13 @@ pub enum Instruction {
     /// Copy `bytes` into the arena at `offset`. Used to initialise constant inputs.
     InitBytes { offset: usize, bytes: Vec<u8> },
 
+    /// Store a `TypeSlot { size, align }` at `offset` inside the arena.
+    ///
+    /// Emitted by the codegen whenever a generic node's type parameter `T` has
+    /// been resolved at graph-compile time.  The VM writes the struct into the
+    /// arena; the dispatch function reads it via `type_slots[i]`.
+    InitTypeSlot { offset: usize, size: usize, align: usize },
+
     /// Direct function call — no dispatch table, no type lookup.
     ///
     /// `fn_ptr` is patched by the executor (via dlsym) before execution.
@@ -20,12 +29,15 @@ pub enum Instruction {
     /// (ignored when `has_output` is false).
     /// `node_type` is retained only for the executor's dlsym resolution and
     /// debug output; the VM hot loop never reads it.
+    /// `type_slot_offsets` are arena offsets of `TypeSlot` values, one per
+    /// resolved generic type parameter.  Empty for fully-concrete functions.
     Call {
-        fn_ptr:        u64,
-        node_type:     String,
-        input_offsets: Vec<usize>,
-        output_offset: usize,
-        has_output:    bool,
+        fn_ptr:             u64,
+        node_type:          String,
+        input_offsets:      Vec<usize>,
+        output_offset:      usize,
+        has_output:         bool,
+        type_slot_offsets:  Vec<usize>,
     },
 
     /// Branch on the bool byte at `condition_offset` (non-zero → true).

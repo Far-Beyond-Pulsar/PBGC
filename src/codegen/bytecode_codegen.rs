@@ -216,13 +216,15 @@ impl<'a> BytecodeCodegen<'a> {
             let input_offsets = self.collect_input_offsets_for(&node, &meta)?;
             self.max_args_count = self.max_args_count.max(input_offsets.len());
             let (output_offset, has_output) = self.alloc_output_for_meta(&node.id, &node.node_type, &meta);
+            let type_slot_offsets = self.collect_type_slot_offsets_for(&node)?;
 
             self.instructions.push(Instruction::Call {
-                fn_ptr:        0,
-                node_type:     meta.name.to_string(),
+                fn_ptr:            0,
+                node_type:         meta.name.to_string(),
                 input_offsets,
                 output_offset,
                 has_output,
+                type_slot_offsets,
             });
         }
         Ok(())
@@ -256,13 +258,15 @@ impl<'a> BytecodeCodegen<'a> {
         let input_offsets = self.collect_input_offsets_for(node, meta)?;
         self.max_args_count = self.max_args_count.max(input_offsets.len());
         let (output_offset, has_output) = self.alloc_output_for_meta(&node.id, &node.node_type, meta);
+        let type_slot_offsets = self.collect_type_slot_offsets_for(node)?;
 
         self.instructions.push(Instruction::Call {
-            fn_ptr:        0,
-            node_type:     meta.name.to_string(),
+            fn_ptr:            0,
+            node_type:         meta.name.to_string(),
             input_offsets,
             output_offset,
             has_output,
+            type_slot_offsets,
         });
         self.follow_exec_outputs(node)
     }
@@ -279,11 +283,12 @@ impl<'a> BytecodeCodegen<'a> {
         self.max_args_count = self.max_args_count.max(1);
 
         self.instructions.push(Instruction::Call {
-            fn_ptr:        0,
-            node_type:     format!("set_{}", var_name),
-            input_offsets: vec![val_offset],
-            output_offset: 0,
-            has_output:    false,
+            fn_ptr:           0,
+            node_type:        format!("set_{}", var_name),
+            input_offsets:    vec![val_offset],
+            output_offset:    0,
+            has_output:       false,
+            type_slot_offsets: vec![],
         });
         self.follow_exec_outputs(node)
     }
@@ -374,6 +379,91 @@ impl<'a> BytecodeCodegen<'a> {
             }
         }
         Ok(())
+    }
+
+    // ── TypeSlot allocation ───────────────────────────────────────────────────
+    //
+    // For a generic node call, bare-T parameters (those whose compile-time size
+    // is 0 from the T→() substitution) need a runtime TypeSlot in the arena so
+    // the dispatch shim can read element size/align from type_slots[i].
+    //
+    // Algorithm:
+    //   For each param with metadata size == 0:
+    //     • Follow its data connection to the source node.
+    //     • Read that node's return_size / return_align from the pulsar_std registry.
+    //     • Deduplicate: if a TypeSlot for that (size, align) was already emitted
+    //       for this call, reuse its offset.
+    //     • Otherwise allocate space in the arena and emit InitTypeSlot.
+    //   Return the slot offsets in the order they are needed by the shim
+    //   (first-unique-bare-T-param first).
+
+    fn collect_type_slot_offsets_for(
+        &mut self,
+        node: &NodeInstance,
+    ) -> Result<Vec<usize>, GraphyError> {
+        use graphy::analysis::DataSource;
+
+        let raw_meta = match pulsar_std::get_all_nodes()
+            .iter()
+            .find(|m| m.name == node.node_type)
+        {
+            Some(m) => m,
+            None    => return Ok(vec![]),  // not in registry, no type slots
+        };
+
+        // Size/align of a TypeSlot value in the arena.
+        let slot_sz  = std::mem::size_of::<pulsar_std::TypeSlot>();
+        let slot_al  = std::mem::align_of::<pulsar_std::TypeSlot>();
+
+        // Deduplicate within this call: (size, align) → arena offset
+        let mut seen: std::collections::HashMap<(usize, usize), usize> = std::collections::HashMap::new();
+        let mut offsets: Vec<usize> = Vec::new();
+
+        for raw_param in raw_meta.params {
+            // Only bare-T params signal size == 0 via the T→() macro substitution.
+            if raw_param.size != 0 {
+                continue;
+            }
+
+            // Find the matching pin on the node instance.
+            let pin = match node.inputs.iter().find(|p| p.pin.name == raw_param.name) {
+                Some(p) => p,
+                None    => continue,
+            };
+
+            // Follow the connection to the source node.
+            let (t_size, t_align) = match self.data_resolver.get_input_source(&node.id, &pin.id) {
+                Some(DataSource::Connection { source_node_id, .. }) => {
+                    let src_type = match self.graph.nodes.get(source_node_id) {
+                        Some(n) => n.node_type.clone(),
+                        None    => continue,
+                    };
+                    self.metadata_provider
+                        .return_layout(&src_type)
+                        .unwrap_or((8, 8))  // safe fallback: 8-byte primitive
+                }
+                // Default / constant bare-T params: use 8-byte fallback.
+                // A zero-size default would produce an empty TypeSlot, so 8/8 is safer.
+                _ => (8, 8),
+            };
+
+            // Deduplicate: reuse an existing slot for the same (size, align).
+            let slot_offset = match seen.entry((t_size, t_align)) {
+                std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    let off = self.layout.alloc(slot_sz, slot_al);
+                    self.instructions.push(Instruction::InitTypeSlot {
+                        offset: off,
+                        size:   t_size,
+                        align:  t_align,
+                    });
+                    *e.insert(off)
+                }
+            };
+            offsets.push(slot_offset);
+        }
+
+        Ok(offsets)
     }
 
     // ── Output allocation ─────────────────────────────────────────────────────
