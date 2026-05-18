@@ -9,7 +9,7 @@ use graphy::{
     Connection, ConnectionType, DataType, GraphDescription, NodeInstance, Pin, PinInstance,
     PinType, Position, PropertyValue,
 };
-use pbgc::{compile_graph, compile_graph_to_bytecode, BpProgram, DispatchFn, Instruction};
+use pbgc::{compile_graph, compile_graph_to_bytecode, BpProgram, Instruction};
 
 // ── Native dispatch shims (mirrors what pulsar_macros generates) ──────────────
 
@@ -74,38 +74,40 @@ unsafe extern "C" fn shim_assert_eq_float(i: *const u64, _o: *mut u64) {
 
 // ── Dispatch table builder ────────────────────────────────────────────────────
 
-fn make_dispatch(program: &BpProgram) -> Vec<DispatchFn> {
-    program.node_types.iter().map(|name| {
-        match name.as_str() {
-            "add"           => shim_add           as DispatchFn,
-            "subtract"      => shim_subtract      as DispatchFn,
-            "multiply"      => shim_multiply      as DispatchFn,
-            "divide"        => shim_divide        as DispatchFn,
-            "modulo"        => shim_modulo        as DispatchFn,
-            "greater_than"  => shim_greater_than  as DispatchFn,
-            "less_than"     => shim_less_than     as DispatchFn,
-            "abs"           => shim_abs           as DispatchFn,
-            "sqrt"          => shim_sqrt          as DispatchFn,
-            "lerp"          => shim_lerp          as DispatchFn,
-            "clamp"         => shim_clamp         as DispatchFn,
-            "print_string"  => shim_print_string  as DispatchFn,
-            "assert_true"   => shim_assert_true   as DispatchFn,
-            "assert_false"  => shim_assert_false  as DispatchFn,
-            "assert_eq_int" => shim_assert_eq_int as DispatchFn,
-            "assert_eq_float" => shim_assert_eq_float as DispatchFn,
-            other => panic!("no shim for node type: {}", other),
+fn prepare_with_shims(program: &mut BpProgram) {
+    for instr in &mut program.instructions {
+        if let Instruction::Call { fn_ptr, node_type, .. } = instr {
+            *fn_ptr = match node_type.as_str() {
+                "add"           => shim_add           as u64,
+                "subtract"      => shim_subtract      as u64,
+                "multiply"      => shim_multiply      as u64,
+                "divide"        => shim_divide        as u64,
+                "modulo"        => shim_modulo        as u64,
+                "greater_than"  => shim_greater_than  as u64,
+                "less_than"     => shim_less_than     as u64,
+                "abs"           => shim_abs           as u64,
+                "sqrt"          => shim_sqrt          as u64,
+                "lerp"          => shim_lerp          as u64,
+                "clamp"         => shim_clamp         as u64,
+                "print_string"  => shim_print_string  as u64,
+                "assert_true"   => shim_assert_true   as u64,
+                "assert_false"  => shim_assert_false  as u64,
+                "assert_eq_int" => shim_assert_eq_int as u64,
+                "assert_eq_float" => shim_assert_eq_float as u64,
+                other => panic!("no shim for: {}", other),
+            };
         }
-    }).collect()
+    }
 }
 
-fn run(program: &BpProgram) {
-    let dispatch = make_dispatch(program);
-    pbgc::vm::run(program, &dispatch).unwrap();
+fn run(program: &mut BpProgram) {
+    prepare_with_shims(program);
+    pbgc::vm::run(program).unwrap();
 }
 
 fn compile_and_run(graph: &GraphDescription) {
-    let programs = compile_graph_to_bytecode(graph).expect("compile failed");
-    for prog in &programs { run(prog); }
+    let mut programs = compile_graph_to_bytecode(graph).expect("compile failed");
+    for prog in &mut programs { run(prog); }
 }
 
 // ── Graph builders ────────────────────────────────────────────────────────────
@@ -265,7 +267,11 @@ fn test_node_types_intern_table_populated() {
     g.add_connection(data("a", "a_r", "chk", "chk_a"));
 
     let programs = compile_graph_to_bytecode(&g).unwrap();
-    assert!(programs[0].node_types.contains(&"add".to_string()));
+    // node_type is now embedded directly in Instruction::Call
+    let has_add = programs[0].instructions.iter().any(|i| {
+        matches!(i, Instruction::Call { node_type, .. } if node_type == "add")
+    });
+    assert!(has_add, "should have a Call with node_type='add'");
 }
 
 #[test]
@@ -438,12 +444,11 @@ fn test_serde_roundtrip_preserves_instructions() {
 
     let programs = compile_graph_to_bytecode(&g).unwrap();
     let json = serde_json::to_string(&programs[0]).unwrap();
-    let restored: BpProgram = serde_json::from_str(&json).unwrap();
+    let mut restored: BpProgram = serde_json::from_str(&json).unwrap();
     assert_eq!(programs[0].instructions.len(), restored.instructions.len());
     assert_eq!(programs[0].slot_count, restored.slot_count);
-    assert_eq!(programs[0].node_types, restored.node_types);
-    // Run the restored program to confirm it still executes correctly
-    run(&restored);
+    // fn_ptrs are 0 after deserialization — must re-prepare; test just verifies structure
+    run(&mut restored);
 }
 
 // ── Timing ───────────────────────────────────────────────────────────────────
@@ -493,11 +498,11 @@ fn test_timing_compile_50_nodes_vs_rust_codegen() {
 #[test]
 fn test_timing_vm_execute_1000_times() {
     let g = deep_pure_graph(10);
-    let programs = compile_graph_to_bytecode(&g).unwrap();
-    let dispatch = make_dispatch(&programs[0]);
+    let mut programs = compile_graph_to_bytecode(&g).unwrap();
+    prepare_with_shims(&mut programs[0]);
     let t = Instant::now();
     for _ in 0..1_000 {
-        pbgc::vm::run(&programs[0], &dispatch).unwrap();
+        pbgc::vm::run(&programs[0]).unwrap();
     }
     println!("[timing] 1000 × 10-node VM: {:?} ({:.2}µs/run)",
         t.elapsed(), t.elapsed().as_micros() as f64 / 1000.0);

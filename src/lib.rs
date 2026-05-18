@@ -17,7 +17,7 @@ pub use compiler::{
 // Bytecode types
 pub use bytecode::{BpProgram, Instruction, SlotId, LabelId};
 
-// VM
+// VM — run takes only &BpProgram, fn_ptrs embedded in instructions
 pub use vm::{run, DispatchFn, VmError};
 
 // Disk / project
