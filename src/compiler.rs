@@ -148,7 +148,7 @@ pub fn compile_graph_with_variables(
 ///
 /// This is the second compile target alongside `compile_graph`.
 /// The resulting `BpProgram`s are fed to `BytecodeVm::run()` using any `NodeDispatch`
-/// implementation — typically the engine's WASM-backed dispatcher.
+/// implementation — typically the engine's `pulsar_bp_executor` backed by the native cdylib.
 ///
 /// # Example
 ///
