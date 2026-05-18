@@ -38,18 +38,27 @@
 //! 4. **Execution Flow Analysis** - Map execution connections (via Graphy)
 //! 5. **Code Generation** - Generate Rust code with Blueprint-specific logic
 
+pub mod bytecode;
 pub mod codegen;
 pub mod compiler;
 pub mod disk;
 pub mod metadata;
 pub mod project;
+pub mod vm;
 
 // Re-export the main compilation API
 pub use compiler::{
     compile_graph,
     compile_graph_with_library_manager,
     compile_graph_with_variables,
+    compile_graph_to_bytecode,
 };
+
+// Re-export bytecode types
+pub use bytecode::{BpProgram, BpValue, Instruction};
+
+// Re-export VM
+pub use vm::{BytecodeVm, NodeDispatch, VmError};
 
 // Re-export disk-level project scanning
 pub use disk::{compile_project, compile_project_generated};

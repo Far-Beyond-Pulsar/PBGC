@@ -3,7 +3,8 @@
 //! Main entry points for compiling Blueprint graphs to Rust code.
 
 use crate::metadata::{BlueprintMetadataProvider, get_node_metadata};
-use crate::codegen::BlueprintCodeGenerator;
+use crate::codegen::{BlueprintCodeGenerator, BytecodeCodegen};
+use crate::bytecode::BpProgram;
 use graphy::{GraphDescription, GraphyError, DataResolver, ExecutionRouting};
 use std::collections::HashMap;
 
@@ -140,6 +141,40 @@ pub fn compile_graph_with_variables(
     );
 
     code_generator.generate_program()
+}
+
+/// Compile a Blueprint graph to bytecode programs (one per event entry-point).
+///
+/// This is the second compile target alongside `compile_graph`.
+/// The resulting `BpProgram`s are fed to `BytecodeVm::run()` using any `NodeDispatch`
+/// implementation — typically the engine's WASM-backed dispatcher.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use pbgc::compile_graph_to_bytecode;
+/// use graphy::GraphDescription;
+///
+/// let graph = GraphDescription::new("my_blueprint");
+/// let programs = compile_graph_to_bytecode(&graph).unwrap();
+/// for prog in &programs {
+///     println!("event '{}': {} instructions", prog.name, prog.instructions.len());
+/// }
+/// ```
+pub fn compile_graph_to_bytecode(graph: &GraphDescription) -> Result<Vec<BpProgram>, GraphyError> {
+    tracing::info!("[PBGC] Starting bytecode compilation");
+    tracing::info!("[PBGC] Graph: {} ({} nodes, {} connections)",
+        graph.metadata.name, graph.nodes.len(), graph.connections.len());
+
+    let metadata_provider = BlueprintMetadataProvider::new();
+    let data_resolver = DataResolver::build(graph, &metadata_provider)?;
+    let exec_routing = ExecutionRouting::build_from_graph(graph);
+
+    let mut codegen = BytecodeCodegen::new(graph, &metadata_provider, &data_resolver, &exec_routing);
+    let programs = codegen.generate_programs()?;
+
+    tracing::info!("[PBGC] Bytecode compilation complete ({} programs)", programs.len());
+    Ok(programs)
 }
 
 #[cfg(test)]
