@@ -302,12 +302,12 @@ impl<'a> BytecodeCodegen<'a> {
             DataType::Typed(ti) => match ti.type_string.as_str() {
                 "f64"                         => Instruction::LoadF64 { slot, value: s.parse().unwrap_or(0.0) },
                 "f32"                         => Instruction::LoadF32 { slot, value: s.parse().unwrap_or(0.0) },
-                "bool"                        => Instruction::LoadI32 { slot, value: if s == "true" { 1 } else { 0 } },
+                "bool"                        => Instruction::LoadI32 { slot, value: if s == "true" || s.parse::<f64>().unwrap_or(0.0) != 0.0 { 1 } else { 0 } },
                 "i32"|"u32"|"i16"|"u16"|"i8"|"u8" => Instruction::LoadI32 { slot, value: s.parse().unwrap_or(0) },
                 _                             => Instruction::LoadI64 { slot, value: s.parse::<i64>().unwrap_or_else(|_| s.parse::<f64>().map(|f| f as i64).unwrap_or(0)) },
             },
             DataType::Number  => Instruction::LoadF64 { slot, value: s.parse().unwrap_or(0.0) },
-            DataType::Boolean => Instruction::LoadI32 { slot, value: if s == "true" { 1 } else { 0 } },
+            DataType::Boolean => Instruction::LoadI32 { slot, value: if s == "true" || s.parse::<f64>().unwrap_or(0.0) != 0.0 { 1 } else { 0 } },
             _                 => Instruction::LoadI64 { slot, value: s.parse::<i64>().unwrap_or(0) },
         };
         self.instructions.push(instr);
