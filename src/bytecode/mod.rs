@@ -1,91 +1,36 @@
 use serde::{Deserialize, Serialize};
 
-pub type SlotId = u32;
+pub type SlotId  = u32;
 pub type LabelId = u32;
 
-/// A runtime value in the bytecode VM slot table.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum BpValue {
-    Null,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(String),
-}
-
-impl BpValue {
-    pub fn is_truthy(&self) -> bool {
-        match self {
-            BpValue::Null => false,
-            BpValue::Bool(b) => *b,
-            BpValue::Int(i) => *i != 0,
-            BpValue::Float(f) => *f != 0.0,
-            BpValue::Str(s) => !s.is_empty(),
-        }
-    }
-
-    pub fn as_i64(&self) -> Option<i64> {
-        match self {
-            BpValue::Int(i) => Some(*i),
-            BpValue::Float(f) => Some(*f as i64),
-            BpValue::Bool(b) => Some(*b as i64),
-            _ => None,
-        }
-    }
-
-    pub fn as_f64(&self) -> Option<f64> {
-        match self {
-            BpValue::Float(f) => Some(*f),
-            BpValue::Int(i) => Some(*i as f64),
-            BpValue::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
-            _ => None,
-        }
-    }
-
-    pub fn as_bool(&self) -> bool {
-        self.is_truthy()
-    }
-
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            BpValue::Null => "null",
-            BpValue::Bool(_) => "bool",
-            BpValue::Int(_) => "int",
-            BpValue::Float(_) => "float",
-            BpValue::Str(_) => "str",
-        }
-    }
-}
-
-impl std::fmt::Display for BpValue {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BpValue::Null => write!(f, "null"),
-            BpValue::Bool(b) => write!(f, "{}", b),
-            BpValue::Int(i) => write!(f, "{}", i),
-            BpValue::Float(v) => write!(f, "{}", v),
-            BpValue::Str(s) => write!(f, "{}", s),
-        }
-    }
-}
-
 /// A single bytecode instruction.
+///
+/// All values transit the system as raw `u64` bit-patterns in the slot table.
+/// Typed `Load*` variants store the correct bit representation at compile time;
+/// `Call` lets the native dispatch shim reinterpret each slot as the right type.
+/// No value enum — no runtime type dispatch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Instruction {
-    /// Load a compile-time constant into a slot.
-    LoadConst { slot: SlotId, value: BpValue },
+    /// Store a 64-bit integer constant into a slot.
+    LoadI64 { slot: SlotId, value: i64 },
+    /// Store a 64-bit float constant into a slot (stored as its bit pattern).
+    LoadF64 { slot: SlotId, value: f64 },
+    /// Store a 32-bit integer (or bool as 0/1) constant into a slot.
+    LoadI32 { slot: SlotId, value: i32 },
+    /// Store a 32-bit float constant into a slot (stored as bits in low 32).
+    LoadF32 { slot: SlotId, value: f32 },
 
-    /// Call a node function.
-    /// `node_type_idx` is an index into `BpProgram::node_types` — no heap string in the hot loop.
-    /// `inputs` are slot IDs for each positional parameter.
-    /// `output` is where the return value is stored (None for void functions).
+    /// Call a node function via its pre-resolved native dispatch shim.
+    /// `node_type_idx` indexes `BpProgram::node_types`.
+    /// `inputs` are slot IDs read as `u64` and passed to the shim.
+    /// `output` is the slot the shim writes its result into (None for void).
     Call {
         node_type_idx: u32,
         inputs: Vec<SlotId>,
         output: Option<SlotId>,
     },
 
-    /// Conditional branch: jump to `true_label` if slot is truthy, else `false_label`.
+    /// Conditional branch: jumps to `true_label` if slot != 0, else `false_label`.
     JumpIf {
         condition: SlotId,
         true_label: LabelId,
@@ -95,65 +40,28 @@ pub enum Instruction {
     /// Unconditional jump.
     Jump(LabelId),
 
-    /// Branch target marker — no-op at runtime, used by the VM to resolve labels.
+    /// Label target — no-op at runtime.
     Label(LabelId),
 
     /// End execution of this program.
     Return,
 }
 
-/// A compiled blueprint program ready for the bytecode VM.
+/// A compiled blueprint program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BpProgram {
-    /// Name of the event/entry-point (e.g. `"begin_play"`, `"tick"`).
+    /// Name of the event/entry-point (e.g. `"begin_play"`).
     pub name: String,
-    /// Total number of value slots required.
+    /// Total number of `u64` slots required.
     pub slot_count: u32,
     pub instructions: Vec<Instruction>,
-    /// Interned node type strings. `Instruction::Call::node_type_idx` indexes into this.
-    /// Resolved once before execution; the hot loop never touches heap strings.
+    /// Interned node type strings. `Instruction::Call::node_type_idx` indexes this.
+    /// Used by the executor to look up `__bp_dispatch_<name>` from the native lib.
     pub node_types: Vec<String>,
 }
 
 impl BpProgram {
     pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            slot_count: 0,
-            instructions: Vec::new(),
-            node_types: Vec::new(),
-        }
+        Self { name: name.into(), slot_count: 0, instructions: Vec::new(), node_types: Vec::new() }
     }
-}
-
-/// Parse a Rust-literal constant string (as produced by the DataResolver) into a BpValue.
-pub fn parse_bp_const(s: &str) -> BpValue {
-    let s = s.trim();
-    if s == "true" {
-        return BpValue::Bool(true);
-    }
-    if s == "false" {
-        return BpValue::Bool(false);
-    }
-    // Strip type suffixes like 42i64, 3.14f64
-    let stripped = s
-        .trim_end_matches("i64")
-        .trim_end_matches("i32")
-        .trim_end_matches("u64")
-        .trim_end_matches("u32")
-        .trim_end_matches("f64")
-        .trim_end_matches("f32")
-        .trim_end_matches("usize")
-        .trim_end_matches("isize");
-    if let Ok(i) = stripped.parse::<i64>() {
-        return BpValue::Int(i);
-    }
-    if let Ok(f) = stripped.parse::<f64>() {
-        return BpValue::Float(f);
-    }
-    // Rust string literals: "hello"
-    if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        return BpValue::Str(s[1..s.len() - 1].to_string());
-    }
-    BpValue::Str(s.to_string())
 }

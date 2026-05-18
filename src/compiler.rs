@@ -8,6 +8,7 @@ use crate::bytecode::BpProgram;
 use graphy::{GraphDescription, GraphyError, DataResolver, ExecutionRouting};
 use std::collections::HashMap;
 
+
 /// Compile a Blueprint graph to Rust source code
 ///
 /// This is the main entry point for the Blueprint compiler. It takes a visual node graph
