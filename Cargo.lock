@@ -350,7 +350,7 @@ dependencies = [
 [[package]]
 name = "pulsar_macros"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Native#dd20b6da34e650facae7825ba18f84dfa2e5b4a9"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Native?rev=6e75c5c216827fafb4fad40c73b09e816c9963a7#6e75c5c216827fafb4fad40c73b09e816c9963a7"
 dependencies = [
  "linkme",
  "proc-macro2",
@@ -361,7 +361,7 @@ dependencies = [
 [[package]]
 name = "pulsar_std"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Native#dd20b6da34e650facae7825ba18f84dfa2e5b4a9"
+source = "git+https://github.com/Far-Beyond-Pulsar/Pulsar-Native?rev=6e75c5c216827fafb4fad40c73b09e816c9963a7#6e75c5c216827fafb4fad40c73b09e816c9963a7"
 dependencies = [
  "linkme",
  "pulsar_macros",
