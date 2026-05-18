@@ -75,11 +75,12 @@ pub enum Instruction {
     /// Load a compile-time constant into a slot.
     LoadConst { slot: SlotId, value: BpValue },
 
-    /// Call a node function by its registered name.
+    /// Call a node function.
+    /// `node_type_idx` is an index into `BpProgram::node_types` — no heap string in the hot loop.
     /// `inputs` are slot IDs for each positional parameter.
     /// `output` is where the return value is stored (None for void functions).
     Call {
-        node_type: String,
+        node_type_idx: u32,
         inputs: Vec<SlotId>,
         output: Option<SlotId>,
     },
@@ -109,6 +110,9 @@ pub struct BpProgram {
     /// Total number of value slots required.
     pub slot_count: u32,
     pub instructions: Vec<Instruction>,
+    /// Interned node type strings. `Instruction::Call::node_type_idx` indexes into this.
+    /// Resolved once before execution; the hot loop never touches heap strings.
+    pub node_types: Vec<String>,
 }
 
 impl BpProgram {
@@ -117,6 +121,7 @@ impl BpProgram {
             name: name.into(),
             slot_count: 0,
             instructions: Vec::new(),
+            node_types: Vec::new(),
         }
     }
 }

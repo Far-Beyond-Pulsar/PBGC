@@ -35,15 +35,16 @@ impl std::error::Error for VmError {}
 /// Dispatches a node call to the underlying implementation (WASM or native).
 ///
 /// The engine wires this to its pre-compiled `pulsar_std.wasm` exports.
-/// Each call maps `node_type` (e.g. `"add"`) to a WASM export of the same name,
-/// converts `inputs` from `BpValue` to the export's concrete parameter types,
-/// and returns the result as a `Vec<BpValue>` (length 0 or 1 for the return value).
+/// `node_type` is the interned string looked up once from `BpProgram::node_types`
+/// before the hot loop — no heap allocation per call.
+/// Results are written into `output` (set to `None` for void functions).
 pub trait NodeDispatch {
     fn call(
         &self,
         node_type: &str,
         inputs: &[BpValue],
-    ) -> Result<Vec<BpValue>, VmError>;
+        output: &mut Option<BpValue>,
+    ) -> Result<(), VmError>;
 }
 
 // ── BytecodeVm ────────────────────────────────────────────────────────────────────
@@ -66,6 +67,9 @@ impl<'d, D: NodeDispatch> BytecodeVm<'d, D> {
     pub fn run(&self, program: &BpProgram) -> Result<(), VmError> {
         let mut slots = vec![BpValue::Null; program.slot_count as usize];
         let label_table = build_label_table(&program.instructions)?;
+        // Reusable scratch buffer — avoids one Vec allocation per Call
+        let mut args: Vec<BpValue> = Vec::new();
+        let mut call_output: Option<BpValue> = None;
         let mut pc = 0usize;
 
         loop {
@@ -80,23 +84,30 @@ impl<'d, D: NodeDispatch> BytecodeVm<'d, D> {
                 }
 
                 Instruction::Call {
-                    node_type,
+                    node_type_idx,
                     inputs,
                     output,
                 } => {
-                    let args: Vec<BpValue> = inputs
-                        .iter()
-                        .map(|&s| get_slot(&slots, s).cloned())
-                        .collect::<Result<Vec<_>, _>>()?;
+                    // Intern table lookup — one array index, no heap allocation
+                    let node_type = program
+                        .node_types
+                        .get(*node_type_idx as usize)
+                        .map(String::as_str)
+                        .ok_or_else(|| VmError::UnknownNode(format!("idx {}", node_type_idx)))?;
 
-                    let results = self
-                        .dispatch
-                        .call(node_type, &args)
+                    // Reuse scratch buffer instead of allocating per call
+                    args.clear();
+                    for &s in inputs {
+                        args.push(get_slot(&slots, s)?.clone());
+                    }
+
+                    call_output = None;
+                    self.dispatch
+                        .call(node_type, &args, &mut call_output)
                         .map_err(|e| VmError::DispatchError(format!("{}: {}", node_type, e)))?;
 
                     if let Some(out_slot) = output {
-                        let val = results.into_iter().next().unwrap_or(BpValue::Null);
-                        set_slot(&mut slots, *out_slot, val)?;
+                        set_slot(&mut slots, *out_slot, call_output.take().unwrap_or(BpValue::Null))?;
                     }
                     pc += 1;
                 }

@@ -16,6 +16,10 @@ pub struct BytecodeCodegen<'a> {
     output_slots: HashMap<String, SlotId>,
     /// dedup cache for constants: (node_id, pin_id, raw_str) → slot
     const_slots: HashMap<String, SlotId>,
+    /// node_type string → interned index into BpProgram::node_types
+    node_type_intern: HashMap<String, u32>,
+    /// intern table in insertion order, becomes BpProgram::node_types
+    node_types: Vec<String>,
 
     next_slot: SlotId,
     next_label: LabelId,
@@ -37,10 +41,22 @@ impl<'a> BytecodeCodegen<'a> {
             instructions: Vec::new(),
             output_slots: HashMap::new(),
             const_slots: HashMap::new(),
+            node_type_intern: HashMap::new(),
+            node_types: Vec::new(),
             next_slot: 0,
             next_label: 0,
             visited: HashSet::new(),
         }
+    }
+
+    fn intern_node_type(&mut self, name: &str) -> u32 {
+        if let Some(&idx) = self.node_type_intern.get(name) {
+            return idx;
+        }
+        let idx = self.node_types.len() as u32;
+        self.node_types.push(name.to_string());
+        self.node_type_intern.insert(name.to_string(), idx);
+        idx
     }
 
     fn alloc_slot(&mut self) -> SlotId {
@@ -121,6 +137,7 @@ impl<'a> BytecodeCodegen<'a> {
         let mut prog = BpProgram::new(meta.name.clone());
         prog.instructions = prog_instructions;
         prog.slot_count = self.next_slot;
+        prog.node_types = self.node_types.clone();
         Ok(prog)
     }
 
@@ -163,8 +180,9 @@ impl<'a> BytecodeCodegen<'a> {
             } else {
                 None
             };
+            let idx = self.intern_node_type(&meta.name);
             self.instructions.push(Instruction::Call {
-                node_type: meta.name.to_string(),
+                node_type_idx: idx,
                 inputs: input_slots,
                 output: output_slot,
             });
@@ -216,8 +234,9 @@ impl<'a> BytecodeCodegen<'a> {
             None
         };
 
+        let idx = self.intern_node_type(&meta.name);
         self.instructions.push(Instruction::Call {
-            node_type: meta.name.to_string(),
+            node_type_idx: idx,
             inputs: input_slots,
             output: output_slot,
         });
@@ -244,8 +263,10 @@ impl<'a> BytecodeCodegen<'a> {
 
         // Emit as a call to the synthetic "set_<var>" node type; the engine's dispatch
         // handles it by writing to the variable store.
+        let setter_name = format!("set_{}", var_name);
+        let idx = self.intern_node_type(&setter_name);
         self.instructions.push(Instruction::Call {
-            node_type: format!("set_{}", var_name),
+            node_type_idx: idx,
             inputs: vec![value_slot],
             output: None,
         });
