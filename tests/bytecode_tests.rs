@@ -1,8 +1,8 @@
 /// PBGC bytecode compiler + VM tests.
 ///
-/// All dispatch is via raw `unsafe extern "C" fn(*const u64, *mut u64)` pointers —
-/// the same ABI the native `__bp_dispatch_*` shims in pulsar_std use.
-/// No BpValue, no NodeDispatch trait, no enum matching anywhere.
+/// All dispatch is via raw `unsafe extern "C" fn(*const *const u8, *mut u8)` pointers —
+/// the same ABI the `#[blueprint]` macro generates in pulsar_std.
+/// No BpValue, no NodeDispatch trait, no type matching in the VM.
 use std::time::Instant;
 
 use graphy::{
@@ -11,65 +11,93 @@ use graphy::{
 };
 use pbgc::{compile_graph, compile_graph_to_bytecode, BpProgram, Instruction};
 
-// ── Native dispatch shims (mirrors what pulsar_macros generates) ──────────────
+// ── Native dispatch shims (mirrors what pulsar_macros #[blueprint] generates) ─
+//
+// ABI: unsafe extern "C" fn(args: *const *const u8, ret: *mut u8)
+//   args[i] → pointer into the byte arena at the i-th input's offset
+//   ret     → pointer to the output region in the arena
 
-unsafe extern "C" fn shim_add(i: *const u64, o: *mut u64) {
-    let a = *(i) as i64;
-    let b = *(i.add(1)) as i64;
-    *(o as *mut i64) = a + b;
+unsafe extern "C" fn shim_add(args: *const *const u8, ret: *mut u8) {
+    let a = std::ptr::read(*args           as *const i64);
+    let b = std::ptr::read(*args.add(1)    as *const i64);
+    std::ptr::write(ret as *mut i64, a + b);
 }
-unsafe extern "C" fn shim_subtract(i: *const u64, o: *mut u64) {
-    *(o as *mut i64) = *(i) as i64 - *(i.add(1)) as i64;
+unsafe extern "C" fn shim_subtract(args: *const *const u8, ret: *mut u8) {
+    let a = std::ptr::read(*args           as *const i64);
+    let b = std::ptr::read(*args.add(1)    as *const i64);
+    std::ptr::write(ret as *mut i64, a - b);
 }
-unsafe extern "C" fn shim_multiply(i: *const u64, o: *mut u64) {
-    *(o as *mut i64) = *(i) as i64 * *(i.add(1)) as i64;
+unsafe extern "C" fn shim_multiply(args: *const *const u8, ret: *mut u8) {
+    let a = std::ptr::read(*args           as *const i64);
+    let b = std::ptr::read(*args.add(1)    as *const i64);
+    std::ptr::write(ret as *mut i64, a * b);
 }
-unsafe extern "C" fn shim_divide(i: *const u64, o: *mut u64) {
-    let (a, b) = (*(i) as i64, *(i.add(1)) as i64);
-    *(o as *mut i64) = if b == 0 { 0 } else { a / b };
+unsafe extern "C" fn shim_divide(args: *const *const u8, ret: *mut u8) {
+    let a = std::ptr::read(*args           as *const i64);
+    let b = std::ptr::read(*args.add(1)    as *const i64);
+    std::ptr::write(ret as *mut i64, if b == 0 { 0 } else { a / b });
 }
-unsafe extern "C" fn shim_modulo(i: *const u64, o: *mut u64) {
-    let (a, b) = (*(i) as i64, *(i.add(1)) as i64);
-    *(o as *mut i64) = if b == 0 { 0 } else { a % b };
+unsafe extern "C" fn shim_modulo(args: *const *const u8, ret: *mut u8) {
+    let a = std::ptr::read(*args           as *const i64);
+    let b = std::ptr::read(*args.add(1)    as *const i64);
+    std::ptr::write(ret as *mut i64, if b == 0 { 0 } else { a % b });
 }
-unsafe extern "C" fn shim_greater_than(i: *const u64, o: *mut u64) {
-    let a = f64::from_bits(*i);
-    let b = f64::from_bits(*i.add(1));
-    *o = (a > b) as u64;
+unsafe extern "C" fn shim_greater_than(args: *const *const u8, ret: *mut u8) {
+    let a = std::ptr::read(*args           as *const f64);
+    let b = std::ptr::read(*args.add(1)    as *const f64);
+    std::ptr::write(ret as *mut bool, a > b);
 }
-unsafe extern "C" fn shim_less_than(i: *const u64, o: *mut u64) {
-    *o = (f64::from_bits(*i) < f64::from_bits(*i.add(1))) as u64;
+unsafe extern "C" fn shim_less_than(args: *const *const u8, ret: *mut u8) {
+    let a = std::ptr::read(*args           as *const f64);
+    let b = std::ptr::read(*args.add(1)    as *const f64);
+    std::ptr::write(ret as *mut bool, a < b);
 }
-unsafe extern "C" fn shim_abs(i: *const u64, o: *mut u64) {
-    *o = f64::from_bits(*i).abs().to_bits();
+unsafe extern "C" fn shim_abs(args: *const *const u8, ret: *mut u8) {
+    let v = std::ptr::read(*args           as *const f64);
+    std::ptr::write(ret as *mut f64, v.abs());
 }
-unsafe extern "C" fn shim_sqrt(i: *const u64, o: *mut u64) {
-    *o = f64::from_bits(*i).sqrt().to_bits();
+unsafe extern "C" fn shim_sqrt(args: *const *const u8, ret: *mut u8) {
+    let v = std::ptr::read(*args           as *const f64);
+    std::ptr::write(ret as *mut f64, v.sqrt());
 }
-unsafe extern "C" fn shim_lerp(i: *const u64, o: *mut u64) {
-    let (a, b, t) = (f64::from_bits(*i), f64::from_bits(*i.add(1)), f64::from_bits(*i.add(2)));
-    *o = (a + (b - a) * t).to_bits();
+unsafe extern "C" fn shim_lerp(args: *const *const u8, ret: *mut u8) {
+    let a = std::ptr::read(*args           as *const f64);
+    let b = std::ptr::read(*args.add(1)    as *const f64);
+    let t = std::ptr::read(*args.add(2)    as *const f64);
+    std::ptr::write(ret as *mut f64, a + (b - a) * t);
 }
-unsafe extern "C" fn shim_clamp(i: *const u64, o: *mut u64) {
-    *o = f64::from_bits(*i).clamp(f64::from_bits(*i.add(1)), f64::from_bits(*i.add(2))).to_bits();
+unsafe extern "C" fn shim_clamp(args: *const *const u8, ret: *mut u8) {
+    let v   = std::ptr::read(*args         as *const f64);
+    let min = std::ptr::read(*args.add(1)  as *const f64);
+    let max = std::ptr::read(*args.add(2)  as *const f64);
+    std::ptr::write(ret as *mut f64, v.clamp(min, max));
 }
-unsafe extern "C" fn shim_print_string(_i: *const u64, _o: *mut u64) {}
+unsafe extern "C" fn shim_print_string(_args: *const *const u8, _ret: *mut u8) {}
 
-// ── Assert shims — return via panic propagation through the VM ────────────────
+// ── Assert shims ──────────────────────────────────────────────────────────────
 
-unsafe extern "C" fn shim_assert_true(i: *const u64, _o: *mut u64) {
-    assert!(*i != 0, "assert_true failed: condition was false");
+unsafe extern "C" fn shim_assert_true(args: *const *const u8, _ret: *mut u8) {
+    let cond = std::ptr::read(*args as *const bool);
+    assert!(cond, "assert_true failed: condition was false");
 }
-unsafe extern "C" fn shim_assert_false(i: *const u64, _o: *mut u64) {
-    assert!(*i == 0, "assert_false failed: condition was true");
+unsafe extern "C" fn shim_assert_false(args: *const *const u8, _ret: *mut u8) {
+    let cond = std::ptr::read(*args as *const bool);
+    assert!(!cond, "assert_false failed: condition was true");
 }
-unsafe extern "C" fn shim_assert_eq_int(i: *const u64, _o: *mut u64) {
-    let (a, b) = (*(i) as i64, *(i.add(1)) as i64);
-    assert_eq!(a, b, "assert_eq_int failed");
+unsafe extern "C" fn shim_assert_eq_int(args: *const *const u8, _ret: *mut u8) {
+    let actual   = std::ptr::read(*args        as *const i64);
+    let expected = std::ptr::read(*args.add(1) as *const i64);
+    assert_eq!(actual, expected, "assert_eq_int failed");
 }
-unsafe extern "C" fn shim_assert_eq_float(i: *const u64, _o: *mut u64) {
-    let (a, b, eps) = (f64::from_bits(*i), f64::from_bits(*i.add(1)), f64::from_bits(*i.add(2)));
-    assert!((a - b).abs() < eps, "assert_eq_float failed: |{} - {}| = {} >= eps {}", a, b, (a-b).abs(), eps);
+unsafe extern "C" fn shim_assert_eq_float(args: *const *const u8, _ret: *mut u8) {
+    let actual   = std::ptr::read(*args        as *const f64);
+    let expected = std::ptr::read(*args.add(1) as *const f64);
+    let eps      = std::ptr::read(*args.add(2) as *const f64);
+    assert!(
+        (actual - expected).abs() < eps,
+        "assert_eq_float failed: |{} - {}| = {} >= eps {}",
+        actual, expected, (actual - expected).abs(), eps
+    );
 }
 
 // ── Dispatch table builder ────────────────────────────────────────────────────
@@ -78,21 +106,21 @@ fn prepare_with_shims(program: &mut BpProgram) {
     for instr in &mut program.instructions {
         if let Instruction::Call { fn_ptr, node_type, .. } = instr {
             *fn_ptr = match node_type.as_str() {
-                "add"           => shim_add           as u64,
-                "subtract"      => shim_subtract      as u64,
-                "multiply"      => shim_multiply      as u64,
-                "divide"        => shim_divide        as u64,
-                "modulo"        => shim_modulo        as u64,
-                "greater_than"  => shim_greater_than  as u64,
-                "less_than"     => shim_less_than     as u64,
-                "abs"           => shim_abs           as u64,
-                "sqrt"          => shim_sqrt          as u64,
-                "lerp"          => shim_lerp          as u64,
-                "clamp"         => shim_clamp         as u64,
-                "print_string"  => shim_print_string  as u64,
-                "assert_true"   => shim_assert_true   as u64,
-                "assert_false"  => shim_assert_false  as u64,
-                "assert_eq_int" => shim_assert_eq_int as u64,
+                "add"             => shim_add             as u64,
+                "subtract"        => shim_subtract        as u64,
+                "multiply"        => shim_multiply        as u64,
+                "divide"          => shim_divide          as u64,
+                "modulo"          => shim_modulo          as u64,
+                "greater_than"    => shim_greater_than    as u64,
+                "less_than"       => shim_less_than       as u64,
+                "abs"             => shim_abs             as u64,
+                "sqrt"            => shim_sqrt            as u64,
+                "lerp"            => shim_lerp            as u64,
+                "clamp"           => shim_clamp           as u64,
+                "print_string"    => shim_print_string    as u64,
+                "assert_true"     => shim_assert_true     as u64,
+                "assert_false"    => shim_assert_false    as u64,
+                "assert_eq_int"   => shim_assert_eq_int   as u64,
                 "assert_eq_float" => shim_assert_eq_float as u64,
                 other => panic!("no shim for: {}", other),
             };
@@ -149,17 +177,17 @@ fn gt_node(id: &str, cb: Option<f64>) -> NodeInstance {
 
 fn branch_node(id: &str) -> NodeInstance {
     let mut n = NodeInstance::new(id, "branch", Position { x: 300.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec", DataType::Execution, PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec",      DataType::Execution, PinType::Input)));
     n.inputs.push(PinInstance::new(&format!("{id}_c"), Pin::new(&format!("{id}_c"), "condition", DataType::Typed(graphy::TypeInfo::new("bool")), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_t"), Pin::new(&format!("{id}_t"), "True", DataType::Execution, PinType::Output)));
+    n.outputs.push(PinInstance::new(&format!("{id}_t"), Pin::new(&format!("{id}_t"), "True",  DataType::Execution, PinType::Output)));
     n.outputs.push(PinInstance::new(&format!("{id}_f"), Pin::new(&format!("{id}_f"), "False", DataType::Execution, PinType::Output)));
     n
 }
 
 fn assert_eq_int_node(id: &str, expected: i64) -> NodeInstance {
     let mut n = NodeInstance::new(id, "assert_eq_int", Position { x: 400.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec", DataType::Execution, PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "actual", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec",     DataType::Execution, PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "actual",   DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
     n.inputs.push(PinInstance::new(&format!("{id}_x"), Pin::new(&format!("{id}_x"), "expected", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
     n.outputs.push(PinInstance::new(&format!("{id}_o"), Pin::new(&format!("{id}_o"), "exec", DataType::Execution, PinType::Output)));
     n.properties.insert(format!("{id}_x"), PropertyValue::Number(expected as f64));
@@ -168,19 +196,19 @@ fn assert_eq_int_node(id: &str, expected: i64) -> NodeInstance {
 
 fn assert_eq_float_node(id: &str, expected: f64, epsilon: f64) -> NodeInstance {
     let mut n = NodeInstance::new(id, "assert_eq_float", Position { x: 400.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec", DataType::Execution, PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "actual", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_x"), Pin::new(&format!("{id}_x"), "expected", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_ep"), Pin::new(&format!("{id}_ep"), "epsilon", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_o"), Pin::new(&format!("{id}_o"), "exec", DataType::Execution, PinType::Output)));
-    n.properties.insert(format!("{id}_x"), PropertyValue::Number(expected));
+    n.inputs.push(PinInstance::new(&format!("{id}_e"),  Pin::new(&format!("{id}_e"),  "exec",     DataType::Execution, PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{id}_a"),  Pin::new(&format!("{id}_a"),  "actual",   DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{id}_x"),  Pin::new(&format!("{id}_x"),  "expected", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{id}_ep"), Pin::new(&format!("{id}_ep"), "epsilon",  DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
+    n.outputs.push(PinInstance::new(&format!("{id}_o"),  Pin::new(&format!("{id}_o"), "exec", DataType::Execution, PinType::Output)));
+    n.properties.insert(format!("{id}_x"),  PropertyValue::Number(expected));
     n.properties.insert(format!("{id}_ep"), PropertyValue::Number(epsilon));
     n
 }
 
 fn assert_true_node(id: &str) -> NodeInstance {
     let mut n = NodeInstance::new(id, "assert_true", Position { x: 400.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec", DataType::Execution, PinType::Input)));
+    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec",      DataType::Execution, PinType::Input)));
     n.inputs.push(PinInstance::new(&format!("{id}_c"), Pin::new(&format!("{id}_c"), "condition", DataType::Typed(graphy::TypeInfo::new("bool")), PinType::Input)));
     n.outputs.push(PinInstance::new(&format!("{id}_o"), Pin::new(&format!("{id}_o"), "exec", DataType::Execution, PinType::Output)));
     n
@@ -211,43 +239,40 @@ fn data(from: &str, fp: &str, to: &str, tp: &str) -> Connection {
 // ── Instruction structure tests ───────────────────────────────────────────────
 
 #[test]
-fn test_load_i64_instruction_emitted_for_integer_param() {
+fn test_init_bytes_emitted_for_integer_constant() {
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
-    let mut a = add_node("a", Some(3.0), Some(4.0));
-    g.add_node(a);
-    let chk = assert_eq_int_node("chk", 7);
-    g.add_node(chk);
+    g.add_node(add_node("a", Some(3.0), Some(4.0)));
+    g.add_node(assert_eq_int_node("chk", 7));
     g.add_connection(exec("begin", "be", "chk", "chk_e"));
     g.add_connection(data("a", "a_r", "chk", "chk_a"));
 
     let programs = compile_graph_to_bytecode(&g).unwrap();
-    let has_load_i64 = programs[0].instructions.iter().any(|i| matches!(i, Instruction::LoadI64 { .. }));
-    assert!(has_load_i64, "should emit LoadI64 for integer constants");
+    let has_init = programs[0].instructions.iter()
+        .any(|i| matches!(i, Instruction::InitBytes { .. }));
+    assert!(has_init, "should emit InitBytes for integer constants");
 }
 
 #[test]
-fn test_load_f64_instruction_emitted_for_float_param() {
+fn test_init_bytes_emitted_for_float_constant() {
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
-    let l = lerp_node("l", Some(0.0), Some(1.0), Some(0.5));
-    g.add_node(l);
-    let chk = assert_eq_float_node("chk", 0.5, 1e-9);
-    g.add_node(chk);
+    g.add_node(lerp_node("l", Some(0.0), Some(1.0), Some(0.5)));
+    g.add_node(assert_eq_float_node("chk", 0.5, 1e-9));
     g.add_connection(exec("begin", "be", "chk", "chk_e"));
     g.add_connection(data("l", "l_r", "chk", "chk_a"));
 
     let programs = compile_graph_to_bytecode(&g).unwrap();
-    let has_load_f64 = programs[0].instructions.iter().any(|i| matches!(i, Instruction::LoadF64 { .. }));
-    assert!(has_load_f64, "should emit LoadF64 for float constants");
+    let has_init = programs[0].instructions.iter()
+        .any(|i| matches!(i, Instruction::InitBytes { .. }));
+    assert!(has_init, "should emit InitBytes for float constants");
 }
 
 #[test]
 fn test_branch_emits_jumpif() {
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
-    let gt = gt_node("gt", Some(0.0));
-    g.add_node(gt.clone());
+    g.add_node(gt_node("gt", Some(0.0)));
     g.add_node(branch_node("br"));
     g.add_connection(exec("begin", "be", "br", "br_e"));
     g.add_connection(data("gt", "gt_r", "br", "br_c"));
@@ -257,17 +282,15 @@ fn test_branch_emits_jumpif() {
 }
 
 #[test]
-fn test_node_types_intern_table_populated() {
+fn test_node_type_embedded_in_call_instruction() {
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
     g.add_node(add_node("a", Some(1.0), Some(2.0)));
-    let chk = assert_eq_int_node("chk", 3);
-    g.add_node(chk);
+    g.add_node(assert_eq_int_node("chk", 3));
     g.add_connection(exec("begin", "be", "chk", "chk_e"));
     g.add_connection(data("a", "a_r", "chk", "chk_a"));
 
     let programs = compile_graph_to_bytecode(&g).unwrap();
-    // node_type is now embedded directly in Instruction::Call
     let has_add = programs[0].instructions.iter().any(|i| {
         matches!(i, Instruction::Call { node_type, .. } if node_type == "add")
     });
@@ -275,19 +298,17 @@ fn test_node_types_intern_table_populated() {
 }
 
 #[test]
-fn test_slot_count_positive_when_nodes_produce_values() {
+fn test_arena_size_positive_when_nodes_produce_values() {
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
-    let gt = gt_node("gt", Some(0.0));
-    let mut gt2 = gt.clone();
-    gt2.id = "gt2".to_string();
-    g.add_node(gt);
+    g.add_node(gt_node("gt", Some(0.0)));
+    let mut gt2 = gt_node("gt2", Some(0.0));
     g.add_node(gt2);
     g.add_node(branch_node("br"));
     g.add_connection(exec("begin", "be", "br", "br_e"));
     g.add_connection(data("gt", "gt_r", "br", "br_c"));
     let programs = compile_graph_to_bytecode(&g).unwrap();
-    assert!(programs[0].slot_count > 0);
+    assert!(programs[0].arena_size > 0, "arena_size should be > 0");
 }
 
 // ── Correctness: arithmetic ───────────────────────────────────────────────────
@@ -405,29 +426,20 @@ fn test_correct_branch_true_fires_assert_true() {
 
 #[test]
 fn test_correct_branch_false_path_not_taken_for_true_condition() {
-    // 10 > 0 is true — false branch node should NOT execute.
-    // We put an assert_true on the false path with condition=false so it would fail if reached.
+    // 10 > 0 is true — false branch should NOT execute.
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
     let mut gt = gt_node("gt", Some(0.0));
     gt.properties.insert("gt_a".to_string(), PropertyValue::Number(10.0));
     g.add_node(gt);
     g.add_node(branch_node("br"));
-
-    // True path: a harmless assert_true
     g.add_node(assert_true_node("at"));
-    // False path: assert_true with 0 (false) — would panic if reached
-    let mut canary = assert_true_node("canary");
-    // leave canary condition unconnected → defaults to 0 → would fail
-    g.add_node(canary);
-
+    g.add_node(assert_true_node("canary")); // would fail if reached (condition defaults to 0/false)
     g.add_connection(exec("begin", "be", "br", "br_e"));
     g.add_connection(data("gt", "gt_r", "br", "br_c"));
     g.add_connection(exec("br", "br_t", "at", "at_e"));
     g.add_connection(data("gt", "gt_r", "at", "at_c"));
     g.add_connection(exec("br", "br_f", "canary", "canary_e"));
-    // canary's condition defaults to 0 → assert_true(0) would fail
-    // But the false branch is never taken, so canary is never called.
     compile_and_run(&g);
 }
 
@@ -446,8 +458,8 @@ fn test_serde_roundtrip_preserves_instructions() {
     let json = serde_json::to_string(&programs[0]).unwrap();
     let mut restored: BpProgram = serde_json::from_str(&json).unwrap();
     assert_eq!(programs[0].instructions.len(), restored.instructions.len());
-    assert_eq!(programs[0].slot_count, restored.slot_count);
-    // fn_ptrs are 0 after deserialization — must re-prepare; test just verifies structure
+    assert_eq!(programs[0].arena_size, restored.arena_size);
+    // fn_ptrs are 0 after deserialization — re-prepare before running
     run(&mut restored);
 }
 
@@ -507,3 +519,4 @@ fn test_timing_vm_execute_1000_times() {
     println!("[timing] 1000 × 10-node VM: {:?} ({:.2}µs/run)",
         t.elapsed(), t.elapsed().as_micros() as f64 / 1000.0);
 }
+

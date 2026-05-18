@@ -112,15 +112,42 @@ pub fn get_node_metadata() -> &'static HashMap<String, NodeMetadata> {
 /// Blueprint metadata provider
 ///
 /// Implements the `NodeMetadataProvider` trait for Blueprint nodes.
+/// Also exposes compile-time layout data (size/align) sourced directly from the
+/// `#[blueprint]` macro via `pulsar_std::NodeParameter` — no type-string matching.
 pub struct BlueprintMetadataProvider {
     metadata: &'static HashMap<String, NodeMetadata>,
+    /// Raw pulsar_std metadata, keyed by node name.  Provides authoritative size/align.
+    raw: HashMap<String, &'static pulsar_std::NodeMetadata>,
 }
 
 impl BlueprintMetadataProvider {
     pub fn new() -> Self {
+        let raw: HashMap<String, &'static pulsar_std::NodeMetadata> =
+            pulsar_std::get_all_nodes()
+                .iter()
+                .map(|m| (m.name.to_string(), m))
+                .collect();
         Self {
             metadata: get_node_metadata(),
+            raw,
         }
+    }
+
+    /// Returns (size, align) for a named input parameter of a node.
+    /// Sourced from `size_of::<T>()` / `align_of::<T>()` baked in by the `#[blueprint]` macro.
+    pub fn param_layout(&self, node_type: &str, param_name: &str) -> Option<(usize, usize)> {
+        let raw = self.raw.get(node_type)?;
+        raw.params
+            .iter()
+            .find(|p| p.name == param_name)
+            .map(|p| (p.size, p.align))
+    }
+
+    /// Returns (size, align) for the return value of a node.
+    /// Returns (0, 1) for void-returning nodes.
+    pub fn return_layout(&self, node_type: &str) -> Option<(usize, usize)> {
+        let raw = self.raw.get(node_type)?;
+        Some((raw.return_size, raw.return_align))
     }
 }
 

@@ -1,55 +1,67 @@
 use serde::{Deserialize, Serialize};
 
-pub type SlotId  = u32;
-pub type LabelId = u32;
+pub type LabelId = usize;
 
 /// A single bytecode instruction.
 ///
-/// All values move through the system as raw `u64` bit-patterns in a flat slot table.
-/// No value enum, no type dispatch in the VM loop.
+/// Values live in a flat byte arena. Every instruction references arena positions
+/// by byte offset. The VM has zero knowledge of concrete Rust types: it only moves
+/// pointers and calls pre-resolved function addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Instruction {
-    LoadI64 { slot: SlotId, value: i64 },
-    LoadF64 { slot: SlotId, value: f64 },
-    LoadI32 { slot: SlotId, value: i32 },
-    LoadF32 { slot: SlotId, value: f32 },
+    /// Copy `bytes` into the arena at `offset`. Used to initialise constant inputs.
+    InitBytes { offset: usize, bytes: Vec<u8> },
 
-    /// Direct function call — no dispatch table, no lookup.
+    /// Direct function call — no dispatch table, no type lookup.
     ///
-    /// `fn_ptr` is the address of `__bp_dispatch_<name>` in the native cdylib,
-    /// patched once into the program by the executor before execution.
-    /// The VM transmutes it and calls it directly — one pointer dereference.
-    ///
-    /// `node_type` is kept only for human-readable debug output and
-    /// serde roundtrip; the VM never reads it.
+    /// `fn_ptr` is patched by the executor (via dlsym) before execution.
+    /// `input_offsets` are byte offsets into the arena, one per argument.
+    /// `output_offset` is the byte offset where the return value is written
+    /// (ignored when `has_output` is false).
+    /// `node_type` is retained only for the executor's dlsym resolution and
+    /// debug output; the VM hot loop never reads it.
     Call {
-        fn_ptr:    u64,
-        node_type: String,
-        inputs:    Vec<SlotId>,
-        output:    Option<SlotId>,
+        fn_ptr:        u64,
+        node_type:     String,
+        input_offsets: Vec<usize>,
+        output_offset: usize,
+        has_output:    bool,
     },
 
-    JumpIf { condition: SlotId, true_label: LabelId, false_label: LabelId },
+    /// Branch on the bool byte at `condition_offset` (non-zero → true).
+    JumpIf {
+        condition_offset: usize,
+        true_label:       LabelId,
+        false_label:      LabelId,
+    },
     Jump(LabelId),
     Label(LabelId),
     Return,
 }
 
-/// A compiled blueprint program.
+/// A compiled blueprint program ready to be prepared and run.
 ///
-/// After compilation, `fn_ptr` fields in every `Call` instruction are zero.
-/// Call `BpExecutor::prepare` to resolve them from the native cdylib.
-/// After preparation the program is self-contained: `pbgc::vm::run` takes
-/// only `&BpProgram` — no dispatch table argument.
+/// After compilation, all `fn_ptr` fields are zero.
+/// Call `BpExecutor::prepare` to patch them from the native cdylib.
+/// After preparation `pbgc::vm::run` takes only `&BpProgram`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BpProgram {
-    pub name:        String,
-    pub slot_count:  u32,
-    pub instructions: Vec<Instruction>,
+    pub name:           String,
+    /// Total byte size of the arena required to execute this program.
+    pub arena_size:     usize,
+    /// Peak number of input-pointer arguments across all Call instructions.
+    /// Used to pre-allocate the arg_ptrs scratch buffer in the VM.
+    pub max_args_count: usize,
+    pub instructions:   Vec<Instruction>,
 }
 
 impl BpProgram {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), slot_count: 0, instructions: Vec::new() }
+        Self {
+            name:           name.into(),
+            arena_size:     0,
+            max_args_count: 0,
+            instructions:   Vec::new(),
+        }
     }
 }
