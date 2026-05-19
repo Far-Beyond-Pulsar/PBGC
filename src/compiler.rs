@@ -163,6 +163,14 @@ pub fn compile_graph_with_variables(
 /// }
 /// ```
 pub fn compile_graph_to_bytecode(graph: &GraphDescription) -> Result<Vec<BpProgram>, GraphyError> {
+    compile_graph_to_bytecode_with_variables(graph, HashMap::new())
+}
+
+/// Compile a Blueprint graph to bytecode programs with class variables.
+pub fn compile_graph_to_bytecode_with_variables(
+    graph: &GraphDescription,
+    variables: HashMap<String, String>,
+) -> Result<Vec<BpProgram>, GraphyError> {
     tracing::info!("[PBGC] Starting bytecode compilation");
     tracing::info!("[PBGC] Graph: {} ({} nodes, {} connections)",
         graph.metadata.name, graph.nodes.len(), graph.connections.len());
@@ -171,7 +179,13 @@ pub fn compile_graph_to_bytecode(graph: &GraphDescription) -> Result<Vec<BpProgr
     let data_resolver = DataResolver::build(graph, &metadata_provider)?;
     let exec_routing = ExecutionRouting::build_from_graph(graph);
 
-    let mut codegen = BytecodeCodegen::new(graph, &metadata_provider, &data_resolver, &exec_routing);
+    let mut codegen = BytecodeCodegen::new(
+        graph,
+        &metadata_provider,
+        &data_resolver,
+        &exec_routing,
+        variables,
+    );
     let programs = codegen.generate_programs()?;
 
     tracing::info!("[PBGC] Bytecode compilation complete ({} programs)", programs.len());

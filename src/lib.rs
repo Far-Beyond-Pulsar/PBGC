@@ -12,6 +12,7 @@ pub use compiler::{
     compile_graph_with_library_manager,
     compile_graph_with_variables,
     compile_graph_to_bytecode,
+    compile_graph_to_bytecode_with_variables,
 };
 
 // Bytecode types

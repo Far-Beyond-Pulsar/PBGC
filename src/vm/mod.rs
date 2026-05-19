@@ -105,6 +105,28 @@ pub fn run(program: &BpProgram) -> Result<(), VmError> {
                 pc += 1;
             }
 
+            Instruction::LoadVar { source_offset, output_offset, size } => {
+                unsafe {
+                    std::ptr::copy(
+                        base.add(*source_offset),
+                        base.add(*output_offset),
+                        *size,
+                    );
+                }
+                pc += 1;
+            }
+
+            Instruction::StoreVar { input_offset, target_offset, size } => {
+                unsafe {
+                    std::ptr::copy(
+                        base.add(*input_offset),
+                        base.add(*target_offset),
+                        *size,
+                    );
+                }
+                pc += 1;
+            }
+
             Instruction::JumpIf { condition_offset, true_label, false_label } => {
                 // bool is 1 byte; non-zero == true.
                 let cond = unsafe { *base.add(*condition_offset) != 0 };

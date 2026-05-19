@@ -101,12 +101,15 @@ pub struct BytecodeCodegen<'a> {
     metadata_provider: &'a BlueprintMetadataProvider,
     data_resolver:     &'a DataResolver,
     exec_routing:      &'a ExecutionRouting,
+    variables:         HashMap<String, String>,
 
     instructions:   Vec<Instruction>,
     /// node_id → byte offset of that node's output value in the arena
     output_offsets: HashMap<String, usize>,
     /// canonical key → byte offset of a previously emitted constant
     const_offsets:  HashMap<String, usize>,
+    /// variable name → (arena offset, size, align)
+    variable_slots: HashMap<String, (usize, usize, usize)>,
 
     layout:         LayoutAllocator,
     next_label:     LabelId,
@@ -120,12 +123,14 @@ impl<'a> BytecodeCodegen<'a> {
         metadata_provider: &'a BlueprintMetadataProvider,
         data_resolver:     &'a DataResolver,
         exec_routing:      &'a ExecutionRouting,
+        variables:         HashMap<String, String>,
     ) -> Self {
         Self {
-            graph, metadata_provider, data_resolver, exec_routing,
+            graph, metadata_provider, data_resolver, exec_routing, variables,
             instructions:   Vec::new(),
             output_offsets: HashMap::new(),
             const_offsets:  HashMap::new(),
+            variable_slots: HashMap::new(),
             layout:         LayoutAllocator::new(),
             next_label:     0,
             visited:        HashSet::new(),
@@ -140,6 +145,8 @@ impl<'a> BytecodeCodegen<'a> {
     }
 
     pub fn generate_programs(&mut self) -> Result<Vec<BpProgram>, GraphyError> {
+        self.preallocate_variable_slots()?;
+
         let event_nodes: Vec<NodeInstance> = self.graph.nodes.values()
             .filter(|n| self.metadata_provider.get_node_metadata(&n.node_type)
                 .map(|m| m.node_type == NodeTypes::event)
@@ -156,6 +163,20 @@ impl<'a> BytecodeCodegen<'a> {
             programs.push(self.compile_event(&event)?);
         }
         Ok(programs)
+    }
+
+    fn preallocate_variable_slots(&mut self) -> Result<(), GraphyError> {
+        let mut vars: Vec<(String, String)> = self
+            .variables
+            .iter()
+            .map(|(name, ty)| (name.clone(), ty.clone()))
+            .collect();
+        vars.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (var_name, type_str) in vars {
+            self.ensure_variable_slot(&var_name, &type_str)?;
+        }
+        Ok(())
     }
 
     fn compile_event(&mut self, event: &NodeInstance) -> Result<BpProgram, GraphyError> {
@@ -208,6 +229,12 @@ impl<'a> BytecodeCodegen<'a> {
             let node = match self.graph.nodes.get(&node_id).cloned() {
                 Some(n) => n, None => continue,
             };
+
+            if node.node_type.starts_with("get_") {
+                self.emit_getter(&node)?;
+                continue;
+            }
+
             let meta = match self.metadata_provider.get_node_metadata(&node.node_type) {
                 Some(m) => m.clone(), None => continue,
             };
@@ -274,6 +301,8 @@ impl<'a> BytecodeCodegen<'a> {
     fn emit_setter(&mut self, node: &NodeInstance) -> Result<(), GraphyError> {
         let var_name = node.node_type.strip_prefix("set_")
             .ok_or_else(|| GraphyError::Custom(format!("Bad setter: {}", node.node_type)))?;
+        let var_type = self.variable_type(var_name)?;
+        let (var_offset, var_size, _) = self.ensure_variable_slot(var_name, &var_type)?;
 
         let val_pin = node.inputs.iter().find(|p| p.pin.name == "value")
             .ok_or_else(|| GraphyError::Custom(
@@ -282,15 +311,28 @@ impl<'a> BytecodeCodegen<'a> {
             &node.id, &node.node_type, &val_pin.id, &val_pin.pin.name)?;
         self.max_args_count = self.max_args_count.max(1);
 
-        self.instructions.push(Instruction::Call {
-            fn_ptr:           0,
-            node_type:        format!("set_{}", var_name),
-            input_offsets:    vec![val_offset],
-            output_offset:    0,
-            has_output:       false,
-            type_slot_offsets: vec![],
+        self.instructions.push(Instruction::StoreVar {
+            input_offset: val_offset,
+            target_offset: var_offset,
+            size: var_size,
         });
         self.follow_exec_outputs(node)
+    }
+
+    fn emit_getter(&mut self, node: &NodeInstance) -> Result<(), GraphyError> {
+        let var_name = node.node_type.strip_prefix("get_")
+            .ok_or_else(|| GraphyError::Custom(format!("Bad getter: {}", node.node_type)))?;
+        let var_type = self.variable_type(var_name)?;
+        let (source_offset, var_size, align) = self.ensure_variable_slot(var_name, &var_type)?;
+        let output_offset = self.layout.alloc(var_size, align);
+        self.output_offsets.insert(node.id.clone(), output_offset);
+
+        self.instructions.push(Instruction::LoadVar {
+            source_offset,
+            output_offset,
+            size: var_size,
+        });
+        Ok(())
     }
 
     fn emit_control_flow(
@@ -551,6 +593,32 @@ impl<'a> BytecodeCodegen<'a> {
         }
     }
 
+    fn variable_type(&self, var_name: &str) -> Result<String, GraphyError> {
+        self.variables
+            .get(var_name)
+            .cloned()
+            .ok_or_else(|| GraphyError::Custom(format!("Variable '{}' not found", var_name)))
+    }
+
+    fn ensure_variable_slot(
+        &mut self,
+        var_name: &str,
+        type_str: &str,
+    ) -> Result<(usize, usize, usize), GraphyError> {
+        if let Some(slot) = self.variable_slots.get(var_name) {
+            return Ok(*slot);
+        }
+
+        let (size, align) = variable_layout_for_type(type_str).ok_or_else(|| {
+            GraphyError::Custom(format!("Unsupported variable type '{}' for variable '{}'", type_str, var_name))
+        })?;
+
+        let offset = self.layout.alloc(size, align);
+        let slot = (offset, size, align);
+        self.variable_slots.insert(var_name.to_string(), slot);
+        Ok(slot)
+    }
+
     /// Returns (size, align, type_string) for a named input parameter, sourced
     /// exclusively from the compile-time `pulsar_std` registry.
     fn param_layout_and_type(
@@ -595,4 +663,27 @@ impl<'a> BytecodeCodegen<'a> {
         self.instructions.push(Instruction::InitBytes { offset, bytes });
         Ok(offset)
     }
+}
+
+fn variable_layout_for_type(type_str: &str) -> Option<(usize, usize)> {
+    match type_str.trim() {
+        "bool" | "i8" | "u8" => Some((1, 1)),
+        "i16" | "u16" => Some((2, 2)),
+        "i32" | "u32" | "f32" | "char" => Some((4, 4)),
+        "i64" | "u64" | "f64" | "isize" | "usize" => Some((8, 8)),
+        "String" | "Vec" | "Vec<()>" => Some((std::mem::size_of::<String>(), std::mem::align_of::<String>())),
+        other if other.starts_with("Vec<") => Some((std::mem::size_of::<Vec<u8>>(), std::mem::align_of::<Vec<u8>>())),
+        other if other.starts_with('[') && other.ends_with(']') => parse_array_layout(other),
+        _ => None,
+    }
+}
+
+fn parse_array_layout(type_str: &str) -> Option<(usize, usize)> {
+    // Very small parser for `[T; N]` used by generic shims and array variables.
+    let body = type_str.strip_prefix('[')?.strip_suffix(']')?;
+    let (inner, len_str) = body.rsplit_once(';')?;
+    let len: usize = len_str.trim().parse().ok()?;
+    let (elem_size, elem_align) = variable_layout_for_type(inner.trim())?;
+    let size = elem_size.saturating_mul(len);
+    Some((size, elem_align))
 }

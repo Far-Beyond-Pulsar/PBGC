@@ -40,6 +40,20 @@ pub enum Instruction {
         type_slot_offsets:  Vec<usize>,
     },
 
+    /// Copy bytes from one arena slot into another.
+    LoadVar {
+        source_offset: usize,
+        output_offset: usize,
+        size: usize,
+    },
+
+    /// Store bytes from an input slot into a variable slot.
+    StoreVar {
+        input_offset: usize,
+        target_offset: usize,
+        size: usize,
+    },
+
     /// Branch on the bool byte at `condition_offset` (non-zero → true).
     JumpIf {
         condition_offset: usize,
