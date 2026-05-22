@@ -5,6 +5,7 @@ use std::collections::HashMap;
 pub enum VmError {
     LabelNotFound(LabelId),
     UnresolvedCall(String),
+    InsufficientArena { required: usize, provided: usize },
 }
 
 impl std::fmt::Display for VmError {
@@ -12,6 +13,9 @@ impl std::fmt::Display for VmError {
         match self {
             VmError::LabelNotFound(l)  => write!(f, "label {} not found", l),
             VmError::UnresolvedCall(n) => write!(f, "unresolved call '{}' — forgot BpExecutor::prepare?", n),
+            VmError::InsufficientArena { required, provided } => {
+                write!(f, "insufficient arena size: required {}, provided {}", required, provided)
+            }
         }
     }
 }
@@ -38,7 +42,36 @@ pub type DispatchFn = unsafe extern "C" fn(
 pub fn run(program: &BpProgram) -> Result<(), VmError> {
     // Allocate the byte arena. Vec<u64> guarantees 8-byte alignment of the base pointer.
     let mut arena = vec![0u64; (program.arena_size + 7) / 8];
-    let base = arena.as_mut_ptr() as *mut u8;
+    let arena_ptr = arena.as_mut_ptr() as *mut u8;
+
+    // SAFETY: arena_ptr comes from Vec<u64>, so it is 8-byte aligned and valid for
+    // program.arena_size bytes.
+    unsafe { run_with_external_arena(program, arena_ptr, program.arena_size) }
+}
+
+/// Execute a prepared `BpProgram` with an external arena.
+///
+/// This allows persistent variable state across multiple event executions.
+/// The caller provides a mutable arena that will be used instead of allocating
+/// a fresh one for each run.
+///
+/// # Safety
+/// - `arena` must be valid for reads/writes of at least `arena_size` bytes
+/// - `arena` must be 8-byte aligned
+/// - variable regions in the arena must be initialized before execution
+pub unsafe fn run_with_external_arena(
+    program: &BpProgram,
+    arena: *mut u8,
+    arena_size: usize,
+) -> Result<(), VmError> {
+    if arena_size < program.arena_size {
+        return Err(VmError::InsufficientArena {
+            required: program.arena_size,
+            provided: arena_size,
+        });
+    }
+
+    let base = arena;
 
     // Pre-allocate the argument-pointer scratch buffer once to avoid heap churn.
     let mut arg_ptrs:      Vec<*const u8>  = Vec::with_capacity(program.max_args_count.max(1));

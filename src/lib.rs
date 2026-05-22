@@ -18,8 +18,8 @@ pub use compiler::{
 // Bytecode types
 pub use bytecode::{BpProgram, Instruction, LabelId};
 
-// VM — run takes only &BpProgram, fn_ptrs embedded in instructions
-pub use vm::{run, DispatchFn, VmError};
+// VM execution APIs
+pub use vm::{run, run_with_external_arena, DispatchFn, VmError};
 
 // Disk / project
 pub use disk::{compile_project, compile_project_generated};
