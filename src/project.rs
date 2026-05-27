@@ -445,7 +445,7 @@ use pulsar_std::*;
 #[allow(unused_imports)]
 use super::super::vars::*;
 
-#[derive(EngineClass)]
+#[derive(EngineClass, Clone)]
 {struct_def}
 
 impl {ty} {{
