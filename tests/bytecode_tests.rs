@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use graphy::{
     Connection, ConnectionType, DataType, GraphDescription, NodeInstance, Pin, PinInstance,
-    PinType, Position, PropertyValue,
+    PinType, Position,
 };
 use pbgc::{compile_graph, compile_graph_to_bytecode, BpProgram, Instruction};
 
@@ -151,8 +151,8 @@ fn add_node(id: &str, ca: Option<f64>, cb: Option<f64>) -> NodeInstance {
     n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "a", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
     n.inputs.push(PinInstance::new(&format!("{id}_b"), Pin::new(&format!("{id}_b"), "b", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
     n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Output)));
-    if let Some(v) = ca { n.properties.insert(format!("{id}_a"), PropertyValue::Number(v)); }
-    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), PropertyValue::Number(v)); }
+    if let Some(v) = ca { n.properties.insert(format!("{id}_a"), serde_json::json!(v)); }
+    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), serde_json::json!(v)); }
     n
 }
 
@@ -161,8 +161,8 @@ fn mul_node(id: &str, ca: Option<f64>, cb: Option<f64>) -> NodeInstance {
     n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "a", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
     n.inputs.push(PinInstance::new(&format!("{id}_b"), Pin::new(&format!("{id}_b"), "b", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
     n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Output)));
-    if let Some(v) = ca { n.properties.insert(format!("{id}_a"), PropertyValue::Number(v)); }
-    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), PropertyValue::Number(v)); }
+    if let Some(v) = ca { n.properties.insert(format!("{id}_a"), serde_json::json!(v)); }
+    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), serde_json::json!(v)); }
     n
 }
 
@@ -171,7 +171,7 @@ fn gt_node(id: &str, cb: Option<f64>) -> NodeInstance {
     n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "a", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
     n.inputs.push(PinInstance::new(&format!("{id}_b"), Pin::new(&format!("{id}_b"), "b", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
     n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::Typed(graphy::TypeInfo::new("bool")), PinType::Output)));
-    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), PropertyValue::Number(v)); }
+    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), serde_json::json!(v)); }
     n
 }
 
@@ -190,7 +190,7 @@ fn assert_eq_int_node(id: &str, expected: i64) -> NodeInstance {
     n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "actual",   DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
     n.inputs.push(PinInstance::new(&format!("{id}_x"), Pin::new(&format!("{id}_x"), "expected", DataType::Typed(graphy::TypeInfo::new("i64")), PinType::Input)));
     n.outputs.push(PinInstance::new(&format!("{id}_o"), Pin::new(&format!("{id}_o"), "exec", DataType::Execution, PinType::Output)));
-    n.properties.insert(format!("{id}_x"), PropertyValue::Number(expected as f64));
+    n.properties.insert(format!("{id}_x"), serde_json::json!(expected as f64));
     n
 }
 
@@ -201,8 +201,8 @@ fn assert_eq_float_node(id: &str, expected: f64, epsilon: f64) -> NodeInstance {
     n.inputs.push(PinInstance::new(&format!("{id}_x"),  Pin::new(&format!("{id}_x"),  "expected", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
     n.inputs.push(PinInstance::new(&format!("{id}_ep"), Pin::new(&format!("{id}_ep"), "epsilon",  DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
     n.outputs.push(PinInstance::new(&format!("{id}_o"),  Pin::new(&format!("{id}_o"), "exec", DataType::Execution, PinType::Output)));
-    n.properties.insert(format!("{id}_x"),  PropertyValue::Number(expected));
-    n.properties.insert(format!("{id}_ep"), PropertyValue::Number(epsilon));
+    n.properties.insert(format!("{id}_x"),  serde_json::json!(expected));
+    n.properties.insert(format!("{id}_ep"), serde_json::json!(epsilon));
     n
 }
 
@@ -220,9 +220,9 @@ fn lerp_node(id: &str, ca: Option<f64>, cb: Option<f64>, ct: Option<f64>) -> Nod
     n.inputs.push(PinInstance::new(&format!("{id}_b"), Pin::new(&format!("{id}_b"), "b", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
     n.inputs.push(PinInstance::new(&format!("{id}_t"), Pin::new(&format!("{id}_t"), "t", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Input)));
     n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Output)));
-    if let Some(v) = ca { n.properties.insert(format!("{id}_a"), PropertyValue::Number(v)); }
-    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), PropertyValue::Number(v)); }
-    if let Some(v) = ct { n.properties.insert(format!("{id}_t"), PropertyValue::Number(v)); }
+    if let Some(v) = ca { n.properties.insert(format!("{id}_a"), serde_json::json!(v)); }
+    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), serde_json::json!(v)); }
+    if let Some(v) = ct { n.properties.insert(format!("{id}_t"), serde_json::json!(v)); }
     n
 }
 
@@ -413,7 +413,7 @@ fn test_correct_branch_true_fires_assert_true() {
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
     let mut gt = gt_node("gt", Some(5.0));
-    gt.properties.insert("gt_a".to_string(), PropertyValue::Number(10.0));
+    gt.properties.insert("gt_a".to_string(), serde_json::json!(10.0));
     g.add_node(gt);
     g.add_node(branch_node("br"));
     g.add_node(assert_true_node("at"));
@@ -430,7 +430,7 @@ fn test_correct_branch_false_path_not_taken_for_true_condition() {
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
     let mut gt = gt_node("gt", Some(0.0));
-    gt.properties.insert("gt_a".to_string(), PropertyValue::Number(10.0));
+    gt.properties.insert("gt_a".to_string(), serde_json::json!(10.0));
     g.add_node(gt);
     g.add_node(branch_node("br"));
     g.add_node(assert_true_node("at"));

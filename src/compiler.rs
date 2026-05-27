@@ -221,8 +221,8 @@ mod tests {
             "add_result",
             Pin::new("add_result", "result", DataType::Typed(graphy::TypeInfo::new("f64")), PinType::Output),
         ));
-        add.properties.insert("add_a".to_string(), graphy::PropertyValue::Number(1.0));
-        add.properties.insert("add_b".to_string(), graphy::PropertyValue::Number(3.0));
+        add.properties.insert("add_a".to_string(), serde_json::json!(1.0));
+        add.properties.insert("add_b".to_string(), serde_json::json!(3.0));
 
         let mut gt = graphy::NodeInstance::new("gt_node", "greater_than", Position { x: 200.0, y: 0.0 });
         gt.inputs.push(PinInstance::new(
@@ -237,7 +237,7 @@ mod tests {
             "gt_result",
             Pin::new("gt_result", "result", DataType::Typed(graphy::TypeInfo::new("bool")), PinType::Output),
         ));
-        gt.properties.insert("gt_b".to_string(), graphy::PropertyValue::Number(3.0));
+        gt.properties.insert("gt_b".to_string(), serde_json::json!(3.0));
 
         let mut branch = graphy::NodeInstance::new("branch_node", "branch", Position { x: 300.0, y: 0.0 });
         branch.inputs.push(PinInstance::new(

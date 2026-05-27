@@ -35,7 +35,7 @@ pub use project::{
 // Graphy re-exports
 pub use graphy::{
     GraphDescription, NodeInstance, Connection, Pin, PinInstance,
-    DataType, NodeTypes, Position, ConnectionType, PropertyValue,
+    DataType, NodeTypes, Position, ConnectionType, JsonValue,
     GraphMetadata, Result, GraphyError, PinType,
     NodeMetadata, NodeMetadataProvider,
 };
