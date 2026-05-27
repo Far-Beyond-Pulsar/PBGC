@@ -26,9 +26,12 @@ pub use disk::{compile_project, compile_project_generated};
 pub use project::{
     compile_graph_to_actor_source,
     CompiledBlueprint,
+    CompiledComponent,
+    CompiledVariable,
     GeneratedProject,
     ProjectSpec,
     generate_blueprint_actor_source,
+    generate_blueprint_actor_source_with_components,
     generate_project,
 };
 

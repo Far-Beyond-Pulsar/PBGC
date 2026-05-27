@@ -280,7 +280,24 @@ impl<'a> BlueprintCodeGenerator<'a> {
         }
         self.visited.insert(node.id.clone());
 
-        // Check if this is a variable getter or setter
+        // ── Component nodes ───────────────────────────────────────────────────
+        // Node types follow the convention:
+        //   comp_get_prop::{ClassName}::{PropName}  — pure, value producer
+        //   comp_set_prop::{ClassName}::{PropName}  — exec, value consumer
+        //   comp_call::{ClassName}::{MethodName}    — exec, optional return
+
+        if node.node_type.starts_with("comp_get_prop::") {
+            // Pure node — no exec chain contribution.
+            return Ok(code);
+        }
+        if node.node_type.starts_with("comp_set_prop::") {
+            return self.generate_comp_set_prop_node(node, indent_level);
+        }
+        if node.node_type.starts_with("comp_call::") {
+            return self.generate_comp_call_node(node, indent_level);
+        }
+
+        // ── Variable nodes ────────────────────────────────────────────────────
         if node.node_type.starts_with("get_") {
             // Getter nodes are pure (no exec chain), skip
             return Ok(code);
@@ -309,6 +326,161 @@ impl<'a> BlueprintCodeGenerator<'a> {
                 Ok(code)
             }
         }
+    }
+
+    // ── Component node codegen ────────────────────────────────────────────────
+
+    /// Generate a component property getter expression (pure, inline).
+    ///
+    /// Node type format: `comp_get_prop::{ClassName}::{PropName}`
+    fn generate_comp_get_prop_expr(&self, node: &NodeInstance) -> Result<String, GraphyError> {
+        let rest = node
+            .node_type
+            .strip_prefix("comp_get_prop::")
+            .ok_or_else(|| GraphyError::Custom(format!("Bad comp_get_prop node: {}", node.node_type)))?;
+        let mut parts = rest.splitn(2, "::");
+        let class_name = parts
+            .next()
+            .ok_or_else(|| GraphyError::Custom("Missing class name in comp_get_prop".into()))?;
+        let prop_name = parts
+            .next()
+            .ok_or_else(|| GraphyError::Custom("Missing prop name in comp_get_prop".into()))?;
+
+        // Return the raw JSON value; downstream nodes cast it as needed.
+        // This avoids needing to know the concrete Rust type at codegen time.
+        Ok(format!(
+            r#"pulsar_game::__bp_with_comp(|__store| {{
+                __store.get_property_json("{class_name}", "{prop_name}")
+                    .unwrap_or(serde_json::Value::Null)
+            }})"#
+        ))
+    }
+
+    /// Generate code for `comp_set_prop::{ClassName}::{PropName}` (exec node).
+    fn generate_comp_set_prop_node(
+        &mut self,
+        node: &NodeInstance,
+        indent_level: usize,
+    ) -> Result<String, GraphyError> {
+        let rest = node
+            .node_type
+            .strip_prefix("comp_set_prop::")
+            .ok_or_else(|| GraphyError::Custom(format!("Bad comp_set_prop node: {}", node.node_type)))?;
+        let mut parts = rest.splitn(2, "::");
+        let class_name = parts
+            .next()
+            .ok_or_else(|| GraphyError::Custom("Missing class name in comp_set_prop".into()))?;
+        let prop_name = parts
+            .next()
+            .ok_or_else(|| GraphyError::Custom("Missing prop name in comp_set_prop".into()))?;
+
+        let indent = "    ".repeat(indent_level);
+
+        // Find the value input pin.
+        let value_pin_id = node
+            .inputs
+            .iter()
+            .find(|p| p.pin.name == "value" || !matches!(p.pin.data_type, graphy::DataType::Execution))
+            .map(|p| p.id.clone())
+            .ok_or_else(|| GraphyError::Custom(format!("No value pin on comp_set_prop node: {}", node.id)))?;
+
+        let value_expr = self.generate_input_expression(&node.id, &value_pin_id)?;
+
+        let mut code = format!(
+            r#"{indent}pulsar_game::__bp_with_comp(|__store| {{
+{indent}    __store.set_property_json(
+{indent}        "{class_name}",
+{indent}        "{prop_name}",
+{indent}        serde_json::to_value({value_expr}).unwrap_or(serde_json::Value::Null),
+{indent}    );
+{indent}}});
+"#
+        );
+
+        // Follow exec chain.
+        for output_pin in &node.outputs {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
+                for next_node_id in connected {
+                    if let Some(next_node) = self.graph.nodes.get(next_node_id) {
+                        let next_code = self.generate_exec_chain(next_node, indent_level)?;
+                        code.push_str(&next_code);
+                    }
+                }
+            }
+        }
+
+        Ok(code)
+    }
+
+    /// Generate code for `comp_call::{ClassName}::{MethodName}` (exec node).
+    fn generate_comp_call_node(
+        &mut self,
+        node: &NodeInstance,
+        indent_level: usize,
+    ) -> Result<String, GraphyError> {
+        let rest = node
+            .node_type
+            .strip_prefix("comp_call::")
+            .ok_or_else(|| GraphyError::Custom(format!("Bad comp_call node: {}", node.node_type)))?;
+        let mut parts = rest.splitn(2, "::");
+        let class_name = parts
+            .next()
+            .ok_or_else(|| GraphyError::Custom("Missing class name in comp_call".into()))?;
+        let method_name = parts
+            .next()
+            .ok_or_else(|| GraphyError::Custom("Missing method name in comp_call".into()))?;
+
+        let indent = "    ".repeat(indent_level);
+
+        // Collect data input arguments (skip exec pins).
+        let arg_exprs: Vec<String> = {
+            let mut exprs = Vec::new();
+            for input_pin in &node.inputs {
+                if matches!(input_pin.pin.data_type, graphy::DataType::Execution) {
+                    continue;
+                }
+                let expr = self.generate_input_expression(&node.id, &input_pin.id)?;
+                exprs.push(format!(
+                    "serde_json::to_value({expr}).unwrap_or(serde_json::Value::Null)"
+                ));
+            }
+            exprs
+        };
+
+        let args_vec = if arg_exprs.is_empty() {
+            "vec![]".to_string()
+        } else {
+            format!("vec![{}]", arg_exprs.join(", "))
+        };
+
+        let call_expr = format!(
+            r#"pulsar_game::__bp_with_comp(|__store| {{
+{indent}    __store.call_method_json("{class_name}", "{method_name}", {args_vec})
+{indent}}})"#
+        );
+
+        let mut code = if has_returns_used(node) {
+            let result_var = format!("__comp_result_{}", &node.id[..8.min(node.id.len())]);
+            format!("{indent}let {result_var} = {call_expr};\n")
+        } else {
+            format!("{indent}{call_expr};\n")
+        };
+
+        // Follow exec chain.
+        for output_pin in &node.outputs {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
+                for next_node_id in connected {
+                    if let Some(next_node) = self.graph.nodes.get(next_node_id) {
+                        let next_code = self.generate_exec_chain(next_node, indent_level)?;
+                        code.push_str(&next_code);
+                    }
+                }
+            }
+        }
+
+        Ok(code)
     }
 
     /// Generate code for a function node
@@ -533,6 +705,11 @@ impl<'a> BlueprintCodeGenerator<'a> {
                 let source_node = self.graph.nodes.get(source_node_id)
                     .ok_or_else(|| GraphyError::NodeNotFound(source_node_id.clone()))?;
 
+                // Check if source is a component property getter (pure)
+                if source_node.node_type.starts_with("comp_get_prop::") {
+                    return self.generate_comp_get_prop_expr(source_node);
+                }
+
                 // Check if source is a variable getter
                 if source_node.node_type.starts_with("get_") {
                     let var_name = source_node.node_type.strip_prefix("get_").unwrap();
@@ -651,6 +828,15 @@ fn to_static_var_name(var_name: &str) -> String {
     }
 
     out
+}
+
+/// Check whether any downstream data consumer reads the result of this node.
+///
+/// Used to decide whether to emit a `let` binding for a component call result.
+fn has_returns_used(node: &NodeInstance) -> bool {
+    node.outputs
+        .iter()
+        .any(|p| !matches!(p.pin.data_type, graphy::DataType::Execution))
 }
 
 /// Get default value for a data type

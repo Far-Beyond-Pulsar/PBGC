@@ -56,6 +56,20 @@ fn to_pascal_case(name: &str) -> String {
 
 // ── CompiledBlueprint ─────────────────────────────────────────────────────────
 
+/// Represents a single component instance baked into a compiled blueprint.
+///
+/// The `class_name` must match a class in the reflection registry.
+/// `property_defaults` is raw JSON mirroring the prefab asset's component data.
+#[derive(Debug, Clone)]
+pub struct CompiledComponent {
+    /// Class name as registered in `pulsar_reflection::REGISTRY`.
+    pub class_name: String,
+    /// JSON property overrides from the prefab sidecar.
+    pub property_defaults: serde_json::Value,
+    /// Whether this component is enabled.
+    pub enabled: bool,
+}
+
 /// A blueprint that has already been compiled to Rust source by PBGC.
 #[derive(Debug, Clone)]
 pub struct CompiledBlueprint {
@@ -69,6 +83,8 @@ pub struct CompiledBlueprint {
     pub has_begin_play: bool,
     /// Class variables declared by the blueprint asset.
     pub variables: Vec<CompiledVariable>,
+    /// Component instances attached to this prefab (from the prefab sidecar).
+    pub components: Vec<CompiledComponent>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +107,7 @@ impl CompiledBlueprint {
             has_tick,
             has_begin_play,
             variables: Vec::new(),
+            components: Vec::new(),
         }
     }
 
@@ -106,6 +123,11 @@ impl CompiledBlueprint {
 
     pub fn with_variables(mut self, variables: Vec<CompiledVariable>) -> Self {
         self.variables = variables;
+        self
+    }
+
+    pub fn with_components(mut self, components: Vec<CompiledComponent>) -> Self {
+        self.components = components;
         self
     }
 }
@@ -213,6 +235,17 @@ pub fn generate_blueprint_actor_source(blueprint_name: &str, compiled_source: &s
     gen_blueprint_actor(&bp)
 }
 
+/// Wrap compiled logic + component data into a generated actor source file.
+pub fn generate_blueprint_actor_source_with_components(
+    blueprint_name: &str,
+    compiled_source: &str,
+    components: Vec<CompiledComponent>,
+) -> String {
+    let bp = CompiledBlueprint::new(blueprint_name, compiled_source)
+        .with_components(components);
+    gen_blueprint_actor(&bp)
+}
+
 // ── File generators ───────────────────────────────────────────────────────────
 
 fn gen_blueprints_mod(spec: &ProjectSpec) -> String {
@@ -248,18 +281,130 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
     let ident = to_snake_case(&bp.name);
     let ty = to_pascal_case(&bp.name);
 
-    let begin_play_body = if bp.has_begin_play {
-        "        logic::begin_play();\n".to_string()
+    let has_components = !bp.components.is_empty();
+
+    // ── Component init block ──────────────────────────────────────────────────
+    // Generates the `__init_components` method body that constructs each
+    // component from the prefab defaults baked in at compile time.
+    let init_components_body: String = if has_components {
+        let mut lines = String::new();
+        for comp in &bp.components {
+            if !comp.enabled {
+                continue;
+            }
+            // Serialize the JSON defaults so they can be embedded as a string literal.
+            let json_str = serde_json::to_string(&comp.property_defaults)
+                .unwrap_or_else(|_| "{}".to_string())
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            let class = &comp.class_name;
+            lines.push_str(&format!(
+                "        self.components.add_from_registry(\"{class}\", &serde_json::from_str(\"{json_str}\").unwrap_or(serde_json::json!({{}})));\n"
+            ));
+        }
+        lines
     } else {
-        "        // No begin_play event in this blueprint.\n".to_string()
+        "        // No components on this prefab.\n".to_string()
     };
 
-    let tick_body = if bp.has_tick {
-        "        logic::tick();\n".to_string()
-    } else {
-        "        // No tick event in this blueprint.\n".to_string()
+    // ── begin_play body ───────────────────────────────────────────────────────
+    let begin_play_body = {
+        let mut body = String::new();
+        // Always initialise components first (idempotent after first call).
+        if has_components {
+            body.push_str("        self.__init_components();\n");
+            // Run any component begin_plays via reflection.
+            body.push_str("        self.__run_component_begin_plays();\n");
+        }
+        // Set the thread-local execution context so logic fns can access components.
+        if has_components {
+            body.push_str(
+                "        pulsar_game::__bp_set_comp_ctx(&mut self.components);\n",
+            );
+        }
+        if bp.has_begin_play {
+            body.push_str("        logic::begin_play();\n");
+        } else {
+            body.push_str("        // No begin_play event in this blueprint.\n");
+        }
+        if has_components {
+            body.push_str("        pulsar_game::__bp_clear_comp_ctx();\n");
+        }
+        body
     };
 
+    // ── tick body ─────────────────────────────────────────────────────────────
+    let tick_body = {
+        let mut body = String::new();
+        if has_components {
+            body.push_str(
+                "        pulsar_game::__bp_set_comp_ctx(&mut self.components);\n",
+            );
+        }
+        if bp.has_tick {
+            body.push_str("        logic::tick();\n");
+        } else {
+            body.push_str("        // No tick event in this blueprint.\n");
+        }
+        if has_components {
+            body.push_str("        pulsar_game::__bp_clear_comp_ctx();\n");
+        }
+        body
+    };
+
+    // ── Struct definition ─────────────────────────────────────────────────────
+    let struct_def = if has_components {
+        format!(
+            r#"pub struct {ty} {{
+    /// Runtime component store — populated lazily in `begin_play`.
+    pub components: pulsar_game::ComponentStore,
+}}"#
+        )
+    } else {
+        format!("pub struct {ty} {{}}")
+    };
+
+    let new_body = if has_components {
+        format!("Self {{ components: pulsar_game::ComponentStore::new() }}")
+    } else {
+        "Self {}".to_string()
+    };
+
+    // ── Component helper impls ────────────────────────────────────────────────
+    let component_helpers = if has_components {
+        format!(
+            r#"
+impl {ty} {{
+    /// Initialise components from the prefab defaults baked in at compile time.
+    ///
+    /// Idempotent — does nothing if components are already present.
+    pub fn __init_components(&mut self) {{
+        if !self.components.is_empty() {{ return; }}
+{init_components_body}    }}
+
+    /// Call `begin_play` on each component that implements it.
+    pub fn __run_component_begin_plays(&mut self) {{
+        // Components are EngineClass values; their begin_play (if any) is a
+        // method exposed via the blueprint method registry.
+        for (class_name, _) in self.components.iter() {{
+            // Check if the component registered a "begin_play" method
+            if let Some(methods) = pulsar_reflection::REGISTRY.get_methods(class_name) {{
+                if let Some(bp_method) = methods.into_iter().find(|m| m.name == "begin_play") {{
+                    if let Some(comp) = self.components.get_by_name_mut(class_name) {{
+                        (bp_method.caller)(comp, vec![]);
+                    }}
+                }}
+            }}
+        }}
+    }}
+}}
+"#
+        )
+    } else {
+        String::new()
+    };
+
+    // ── Logic source ──────────────────────────────────────────────────────────
     let indented_source: String = logic_source_for_class(bp)
         .lines()
         .map(|line| {
@@ -271,6 +416,12 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
         })
         .collect();
 
+    let extra_imports = if has_components {
+        "use pulsar_reflection;\n#[allow(unused_imports)]\nuse serde_json;\n"
+    } else {
+        ""
+    };
+
     format!(
         r#"//! Blueprint actor: `{ident}`
 //! Generated by PBGC. Do not hand-edit — changes will be overwritten.
@@ -278,20 +429,20 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
 use pulsar_game::prelude::*;
 use engine_class_derive::EngineClass;
 use pulsar_std::*;
-
+{extra_imports}
 pub mod vars;
 
-#[derive(Clone, EngineClass)]
-pub struct {ty} {{}}
+#[derive(EngineClass)]
+{struct_def}
 
 impl {ty} {{
-    pub fn new() -> Self {{ Self {{}} }}
+    pub fn new() -> Self {{ {new_body} }}
 }}
 
 impl Default for {ty} {{
     fn default() -> Self {{ Self::new() }}
 }}
-
+{component_helpers}
 impl Actor for {ty} {{
     fn begin_play(&mut self, _entity: Entity, _world: &mut World) {{
 {begin_play_body}    }}
