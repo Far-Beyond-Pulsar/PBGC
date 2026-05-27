@@ -469,6 +469,8 @@ mod logic {{
     // logic → events::events → events → <Class> → vars
     #[allow(unused_imports)]
     use super::super::super::vars::*;
+    #[allow(unused_imports)]
+    use pulsar_std::*;
 
 {indented_source}}}
 "#

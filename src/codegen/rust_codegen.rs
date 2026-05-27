@@ -47,9 +47,8 @@ impl<'a> BlueprintCodeGenerator<'a> {
         code.push_str("// DO NOT EDIT - Changes will be overwritten\n");
         code.push_str("// Compiled with PBGC (Pulsar Blueprint Graph Compiler)\n\n");
 
-        // Add imports
-        code.push_str("// NOTE: Replace with actual pulsar_std import in production\n");
-        code.push_str("// use pulsar_std::*;\n\n");
+        // pulsar_std is imported by the enclosing `mod logic` template in project.rs;
+        // no additional imports needed here for the generated function body.
 
         if !self.variables.is_empty() {
             code.push_str("use std::cell::{Cell, RefCell};\n\n");
