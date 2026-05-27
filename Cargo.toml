@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 # General graph compilation library
-graphy = { git = "https://github.com/Far-Beyond-Pulsar/Graphy", rev = "cd8961d65279b890434765ffcc2265e17667682c" }
+graphy = { git = "https://github.com/Far-Beyond-Pulsar/Graphy", rev = "d18837c13dd3e1cf6076d9a3c64c450971a6d1af" }
 
 # Pulsar standard library integration
 pulsar_std = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Native", rev = "6e75c5c216827fafb4fad40c73b09e816c9963a7" }

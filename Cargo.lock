@@ -117,7 +117,7 @@ dependencies = [
 [[package]]
 name = "graphy"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Graphy?rev=cd8961d65279b890434765ffcc2265e17667682c#cd8961d65279b890434765ffcc2265e17667682c"
+source = "git+https://github.com/Far-Beyond-Pulsar/Graphy?rev=d18837c13dd3e1cf6076d9a3c64c450971a6d1af#d18837c13dd3e1cf6076d9a3c64c450971a6d1af"
 dependencies = [
  "quote",
  "rayon",
