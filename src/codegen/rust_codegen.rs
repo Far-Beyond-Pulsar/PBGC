@@ -170,8 +170,12 @@ impl<'a> BlueprintCodeGenerator<'a> {
             .get_node_metadata(&event_node.node_type)
             .ok_or_else(|| GraphyError::NodeNotFound(event_node.node_type.clone()))?;
 
-        // Generate function signature
-        code.push_str(&format!("pub fn {}() {{\n", metadata.name));
+        // Generate function signature — include any event parameters (e.g. delta_time for on_tick)
+        let params: String = metadata.params.iter()
+            .map(|p| format!("{}: {}", p.name, p.param_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        code.push_str(&format!("pub fn {}({}) {{\n", metadata.name, params));
 
         let pure_preamble = self.generate_pure_node_preamble(1)?;
         if !pure_preamble.is_empty() {
