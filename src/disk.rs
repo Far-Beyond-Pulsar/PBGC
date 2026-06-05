@@ -128,14 +128,8 @@ fn compiled_variables(variables: &[ClassVariableFile]) -> Vec<crate::project::Co
 
 fn rust_type_for_data_type(data_type: &DataType) -> String {
     match data_type {
-        DataType::Typed(TypeInfo { type_string }) => type_string.clone(),
-        DataType::Number => "f64".to_string(),
-        DataType::String => "String".to_string(),
-        DataType::Boolean => "bool".to_string(),
-        DataType::Vector2 => "(f32, f32)".to_string(),
-        DataType::Vector3 => "(f32, f32, f32)".to_string(),
-        DataType::Color => "(f32, f32, f32, f32)".to_string(),
-        DataType::Execution | DataType::Any => "()".to_string(),
+        DataType::Data(ti) => ti.type_string.clone(),
+        DataType::Exec => "()".to_string(),
     }
 }
 
@@ -185,7 +179,7 @@ mod tests {
                 let mut begin = NodeInstance::new("begin", "begin_play", Position { x: 0.0, y: 0.0 });
                 begin.outputs.push(PinInstance::new(
                     "begin_exec",
-                    Pin::new("begin_exec", "Body", DataType::Execution, PinType::Output),
+                    Pin::new("begin_exec", "Body", DataType::Exec, PinType::Output),
                 ));
                 graph.add_node(begin);
                 let graph_value = serde_json::to_value(&graph).unwrap();
@@ -196,7 +190,7 @@ mod tests {
                                 {
                                         "id": "var_1",
                                         "name": "health",
-                                        "data_type": graphy::DataType::Typed(TypeInfo::new("f64")),
+                                        "data_type": graphy::DataType::typed("f64"),
                                         "default_value": "100.0",
                                         "description": ""
                                 }

@@ -191,7 +191,7 @@ impl<'a> BytecodeCodegen<'a> {
         self.emit_pure_preamble()?;
 
         for pin in &event.outputs {
-            if matches!(pin.pin.data_type, DataType::Execution) {
+            if matches!(pin.pin.data_type, DataType::Exec) {
                 for nid in self.exec_routing.get_connected_nodes(&event.id, &pin.id).to_vec() {
                     if let Some(n) = self.graph.nodes.get(&nid).cloned() {
                         self.emit_exec_node(&n)?;
@@ -341,10 +341,10 @@ impl<'a> BytecodeCodegen<'a> {
         meta: &graphy::core::NodeMetadata,
     ) -> Result<(), GraphyError> {
         let exec_pins: Vec<_> = node.outputs.iter()
-            .filter(|p| matches!(p.pin.data_type, DataType::Execution))
+            .filter(|p| matches!(p.pin.data_type, DataType::Exec))
             .collect();
         let data_ins: Vec<_> = node.inputs.iter()
-            .filter(|p| !matches!(p.pin.data_type, DataType::Execution))
+            .filter(|p| !matches!(p.pin.data_type, DataType::Exec))
             .collect();
 
         if exec_pins.len() == 2 && data_ins.len() == 1 {
@@ -412,7 +412,7 @@ impl<'a> BytecodeCodegen<'a> {
 
     fn follow_exec_outputs(&mut self, node: &NodeInstance) -> Result<(), GraphyError> {
         for pin in &node.outputs {
-            if matches!(pin.pin.data_type, DataType::Execution) {
+            if matches!(pin.pin.data_type, DataType::Exec) {
                 for nid in self.exec_routing.get_connected_nodes(&node.id, &pin.id).to_vec() {
                     if let Some(n) = self.graph.nodes.get(&nid).cloned() {
                         self.emit_exec_node(&n)?;

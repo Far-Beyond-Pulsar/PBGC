@@ -185,7 +185,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
         // Find execution output pins and follow them
         // We need to look up by pin ID (from the node instance), not pin name (from metadata)
         for output_pin in &event_node.outputs {
-            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
                 tracing::debug!("[CODEGEN] Looking up exec connections for node {} pin ID: {}", 
                     event_node.id, output_pin.id);
                 
@@ -383,7 +383,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let value_pin_id = node
             .inputs
             .iter()
-            .find(|p| p.pin.name == "value" || !matches!(p.pin.data_type, graphy::DataType::Execution))
+            .find(|p| p.pin.name == "value" || !matches!(p.pin.data_type, graphy::DataType::Exec))
             .map(|p| p.id.clone())
             .ok_or_else(|| GraphyError::Custom(format!("No value pin on comp_set_prop node: {}", node.id)))?;
 
@@ -402,7 +402,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
 
         // Follow exec chain.
         for output_pin in &node.outputs {
-            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
                 let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
                 for next_node_id in connected {
                     if let Some(next_node) = self.graph.nodes.get(next_node_id) {
@@ -440,7 +440,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let arg_exprs: Vec<String> = {
             let mut exprs = Vec::new();
             for input_pin in &node.inputs {
-                if matches!(input_pin.pin.data_type, graphy::DataType::Execution) {
+                if matches!(input_pin.pin.data_type, graphy::DataType::Exec) {
                     continue;
                 }
                 let expr = self.generate_input_expression(&node.id, &input_pin.id)?;
@@ -472,7 +472,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
 
         // Follow exec chain.
         for output_pin in &node.outputs {
-            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
                 let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
                 for next_node_id in connected {
                     if let Some(next_node) = self.graph.nodes.get(next_node_id) {
@@ -527,7 +527,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
 
         // Follow execution chain - look up by actual pin IDs from node instance
         for output_pin in &node.outputs {
-            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
                 let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
                 for next_node_id in connected {
                     if let Some(next_node) = self.graph.nodes.get(next_node_id) {
@@ -555,7 +555,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let mut exec_replacements = HashMap::new();
 
         for output_pin in &node.outputs {
-            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
                 let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
 
                 let mut exec_code = String::new();
@@ -660,7 +660,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
 
         // Follow execution chain - use actual pin IDs from node instance
         for output_pin in &node.outputs {
-            if matches!(output_pin.pin.data_type, graphy::DataType::Execution) {
+            if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
                 let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
                 for next_node_id in connected {
                     if let Some(next_node) = self.graph.nodes.get(next_node_id) {
@@ -839,7 +839,7 @@ fn to_static_var_name(var_name: &str) -> String {
 fn has_returns_used(node: &NodeInstance) -> bool {
     node.outputs
         .iter()
-        .any(|p| !matches!(p.pin.data_type, graphy::DataType::Execution))
+        .any(|p| !matches!(p.pin.data_type, graphy::DataType::Exec))
 }
 
 /// Get default value for a data type
@@ -847,16 +847,7 @@ fn get_default_value(data_type: &graphy::DataType) -> String {
     use graphy::DataType;
 
     match data_type {
-        DataType::Execution => "()".to_string(),
-        DataType::Typed(type_info) => {
-            graphy::utils::get_default_value_for_type(&type_info.type_string)
-        }
-        DataType::Number => "0.0".to_string(),
-        DataType::String => "String::new()".to_string(),
-        DataType::Boolean => "false".to_string(),
-        DataType::Vector2 => "(0.0, 0.0)".to_string(),
-        DataType::Vector3 => "(0.0, 0.0, 0.0)".to_string(),
-        DataType::Color => "(0.0, 0.0, 0.0, 1.0)".to_string(),
-        DataType::Any => "Default::default()".to_string(),
+        DataType::Exec => "()".to_string(),
+        DataType::Data(ti) => graphy::utils::get_default_value_for_type(&ti.type_string),
     }
 }
