@@ -390,7 +390,7 @@ impl {ty} {{
             // Check if the component registered a "begin_play" method
             if let Some(methods) = pulsar_reflection::REGISTRY.get_methods(class_name) {{
                 if let Some(bp_method) = methods.into_iter().find(|m| m.name == "begin_play") {{
-                    if let Some(comp) = std::sync::Arc::get_mut(&mut self.components).expect(\"exclusive Arc\").get_by_name_mut(class_name) {{
+                    if let Some(comp) = std::sync::Arc::get_mut(&mut self.components).expect("exclusive Arc").get_by_name_mut(class_name) {{
                         (bp_method.caller)(comp, vec![]);
                     }}
                 }}
