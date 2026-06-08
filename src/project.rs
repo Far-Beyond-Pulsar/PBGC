@@ -384,10 +384,8 @@ impl {ty} {{
 
     /// Call `begin_play` on each component that implements it.
     pub fn __run_component_begin_plays(&mut self) {{
-        // Components are EngineClass values; their begin_play (if any) is a
-        // method exposed via the blueprint method registry.
-        for (class_name, _) in self.components.iter() {{
-            // Check if the component registered a "begin_play" method
+        let class_names: Vec<String> = self.components.iter().map(|(name, _)| name.to_string()).collect();
+        for class_name in &class_names {{
             if let Some(methods) = pulsar_reflection::REGISTRY.get_methods(class_name) {{
                 if let Some(bp_method) = methods.into_iter().find(|m| m.name == "begin_play") {{
                     if let Some(comp) = std::sync::Arc::get_mut(&mut self.components).expect("exclusive Arc").get_by_name_mut(class_name) {{
