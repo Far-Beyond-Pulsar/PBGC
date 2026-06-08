@@ -299,7 +299,7 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
                 .replace('"', "\\\"");
             let class = &comp.class_name;
             lines.push_str(&format!(
-                "        self.components.add_from_registry(\"{class}\", &serde_json::from_str(\"{json_str}\").unwrap_or(serde_json::json!({{}})));\n"
+                "        std::sync::Arc::get_mut(&mut self.components).expect(\"exclusive Arc\").add_from_registry(\"{class}\", &serde_json::from_str(\"{json_str}\").unwrap_or(serde_json::json!({{}})));\n"
             ));
         }
         lines
@@ -319,7 +319,7 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
         // Set the thread-local execution context so logic fns can access components.
         if has_components {
             body.push_str(
-                "        pulsar_game::__bp_set_comp_ctx(&mut self.components);\n",
+                "        pulsar_game::__bp_set_comp_ctx(std::sync::Arc::get_mut(&mut self.components).expect(\"exclusive Arc\"));\n",
             );
         }
         if bp.has_begin_play {
@@ -338,7 +338,7 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
         let mut body = String::new();
         if has_components {
             body.push_str(
-                "        pulsar_game::__bp_set_comp_ctx(&mut self.components);\n",
+                "        pulsar_game::__bp_set_comp_ctx(std::sync::Arc::get_mut(&mut self.components).expect(\"exclusive Arc\"));\n",
             );
         }
         if bp.has_tick {
@@ -390,7 +390,7 @@ impl {ty} {{
             // Check if the component registered a "begin_play" method
             if let Some(methods) = pulsar_reflection::REGISTRY.get_methods(class_name) {{
                 if let Some(bp_method) = methods.into_iter().find(|m| m.name == "begin_play") {{
-                    if let Some(comp) = self.components.get_by_name_mut(class_name) {{
+                    if let Some(comp) = std::sync::Arc::get_mut(&mut self.components).expect(\"exclusive Arc\").get_by_name_mut(class_name) {{
                         (bp_method.caller)(comp, vec![]);
                     }}
                 }}
