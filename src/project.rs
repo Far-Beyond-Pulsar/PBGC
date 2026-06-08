@@ -357,7 +357,7 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
         format!(
             r#"pub struct {ty} {{
     /// Runtime component store — populated lazily in `begin_play`.
-    pub components: pulsar_game::ComponentStore,
+    pub components: std::sync::Arc<pulsar_game::ComponentStore>,
 }}"#
         )
     } else {
@@ -365,7 +365,7 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
     };
 
     let new_body = if has_components {
-        format!("Self {{ components: pulsar_game::ComponentStore::new() }}")
+        format!("Self {{ components: std::sync::Arc::new(pulsar_game::ComponentStore::new()) }}")
     } else {
         "Self {}".to_string()
     };
