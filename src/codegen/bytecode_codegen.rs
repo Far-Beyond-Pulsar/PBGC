@@ -239,8 +239,6 @@ impl<'a> BytecodeCodegen<'a> {
         let prev_max_args = self.max_args_count;
         self.max_args_count = 0;
 
-        self.emit_pure_preamble()?;
-
         for pin in &event.outputs {
             if matches!(pin.pin.data_type, DataType::Exec) {
                 for nid in self
@@ -275,50 +273,6 @@ impl<'a> BytecodeCodegen<'a> {
         prog.arena_size = arena_size;
         prog.max_args_count = max_args_count;
         Ok(prog)
-    }
-
-    // ── Pure preamble ─────────────────────────────────────────────────────────
-
-    fn emit_pure_preamble(&mut self) -> Result<(), GraphyError> {
-        for node_id in self.data_resolver.get_pure_evaluation_order() {
-            let node_id = node_id.to_string();
-            if self.output_offsets.contains_key(&node_id) {
-                continue;
-            }
-            let node = match self.graph.nodes.get(&node_id).cloned() {
-                Some(n) => n,
-                None => continue,
-            };
-
-            if node.node_type.starts_with("get_") {
-                self.emit_getter(&node)?;
-                continue;
-            }
-
-            let meta = match self.metadata_provider.get_node_metadata(&node.node_type) {
-                Some(m) => m.clone(),
-                None => continue,
-            };
-            if meta.node_type != NodeTypes::pure {
-                continue;
-            }
-
-            let input_offsets = self.collect_input_offsets_for(&node, &meta)?;
-            self.max_args_count = self.max_args_count.max(input_offsets.len());
-            let (output_offset, has_output) =
-                self.alloc_output_for_meta(&node.id, &node.node_type, &meta);
-            let type_slot_offsets = self.collect_type_slot_offsets_for(&node)?;
-
-            self.instructions.push(Instruction::Call {
-                fn_ptr: 0,
-                node_type: meta.name.to_string(),
-                input_offsets,
-                output_offset,
-                has_output,
-                type_slot_offsets,
-            });
-        }
-        Ok(())
     }
 
     // ── Exec chain ────────────────────────────────────────────────────────────
@@ -393,7 +347,7 @@ impl<'a> BytecodeCodegen<'a> {
         self.follow_exec_outputs(node)
     }
 
-    fn emit_getter(&mut self, node: &NodeInstance) -> Result<(), GraphyError> {
+    fn emit_getter(&mut self, node: &NodeInstance) -> Result<usize, GraphyError> {
         let var_name = node
             .node_type
             .strip_prefix("get_")
@@ -401,14 +355,13 @@ impl<'a> BytecodeCodegen<'a> {
         let var_type = self.variable_type(var_name)?;
         let (source_offset, var_size, align) = self.ensure_variable_slot(var_name, &var_type)?;
         let output_offset = self.layout.alloc(var_size, align);
-        self.output_offsets.insert(node.id.clone(), output_offset);
 
         self.instructions.push(Instruction::LoadVar {
             source_offset,
             output_offset,
             size: var_size,
         });
-        Ok(())
+        Ok(output_offset)
     }
 
     fn emit_control_flow(
@@ -681,9 +634,53 @@ impl<'a> BytecodeCodegen<'a> {
         match self.data_resolver.get_input_source(node_id, pin_id) {
             Some(DataSource::Connection { source_node_id, .. }) => {
                 let sid = source_node_id.to_string();
-                self.output_offsets.get(&sid).copied().ok_or_else(|| {
-                    GraphyError::Custom(format!("No arena offset for node '{}'", sid))
-                })
+                if let Some(&off) = self.output_offsets.get(&sid) {
+                    return Ok(off);
+                }
+
+                let node = self.graph.nodes.get(&sid).cloned().ok_or_else(|| {
+                    GraphyError::Custom(format!("Source node '{}' not found", sid))
+                })?;
+
+                if node.node_type.starts_with("get_") {
+                    return self.emit_getter(&node);
+                }
+
+                let meta = self.metadata_provider.get_node_metadata(&node.node_type).ok_or_else(|| {
+                    GraphyError::Custom(format!("No metadata for node '{}'", node.node_type))
+                })?.clone();
+
+                if meta.node_type == NodeTypes::pure {
+                    let input_offsets = self.collect_input_offsets_for(&node, &meta)?;
+                    self.max_args_count = self.max_args_count.max(input_offsets.len());
+
+                    let is_void = meta.return_type.as_ref().map(|rt| rt.type_string == "()").unwrap_or(true);
+                    let (output_offset, has_output) = if is_void {
+                        (0, false)
+                    } else {
+                        let (size, align) = self.metadata_provider.return_layout(&node.node_type).unwrap_or((8, 8));
+                        if size == 0 {
+                            (0, false)
+                        } else {
+                            (self.layout.alloc(size, align), true)
+                        }
+                    };
+
+                    let type_slot_offsets = self.collect_type_slot_offsets_for(&node)?;
+
+                    self.instructions.push(Instruction::Call {
+                        fn_ptr: 0,
+                        node_type: meta.name.to_string(),
+                        input_offsets,
+                        output_offset,
+                        has_output,
+                        type_slot_offsets,
+                    });
+
+                    return Ok(output_offset);
+                }
+
+                Err(GraphyError::Custom(format!("No arena offset for node '{}'", sid)))
             }
 
             Some(DataSource::Constant(val)) => {

@@ -251,7 +251,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
     }
 
     fn should_materialize_pure_result(&self, source_node_id: &str) -> bool {
-        self.pure_result_use_count(source_node_id) > 1
+        false
     }
 
     fn pure_result_use_count(&self, source_node_id: &str) -> usize {
