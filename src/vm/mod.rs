@@ -132,7 +132,7 @@ pub unsafe fn run_with_external_arena(
                         type_slots_buf.as_ptr()
                     };
                     // SAFETY: fn_ptr was resolved from the cdylib by the executor.
-                    let f: DispatchFn = std::mem::transmute(*fn_ptr);
+                    let f: DispatchFn = std::mem::transmute(*fn_ptr as usize);
                     f(arg_ptrs.as_ptr(), ret, ts_ptr);
                 }
                 pc += 1;
