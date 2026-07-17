@@ -65,13 +65,24 @@ fn convert_node_metadata(ps_node: &pulsar_std::registry::NodeMetadata) -> NodeMe
         })
         .collect();
 
-    NodeMetadata::new(ps_node.name, node_type, ps_node.category)
+    // Convert conversion metadata
+    let mut meta = NodeMetadata::new(ps_node.name, node_type, ps_node.category)
         .with_params(params)
         .with_return_type(return_type.unwrap_or_else(|| TypeInfo::new("()".to_string())))
         .with_outputs(output_params)
         .with_exec_outputs(exec_outputs)
         .with_imports(imports)
-        .with_source(ps_node.function_source)
+        .with_source(ps_node.function_source);
+
+    if let Some(conv) = &ps_node.conversion {
+        meta = meta.with_conversion(
+            TypeInfo::new(conv.from_type.to_string()),
+            TypeInfo::new(conv.to_type.to_string()),
+            conv.lossless,
+        );
+    }
+
+    meta
 }
 
 /// Extract all node metadata from the pulsar_std registry
