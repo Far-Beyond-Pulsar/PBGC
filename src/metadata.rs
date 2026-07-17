@@ -54,9 +54,21 @@ fn convert_node_metadata(ps_node: &pulsar_std::registry::NodeMetadata) -> NodeMe
         })
         .collect();
 
+    // Convert output_params to graphy OutputParam list
+    let output_params: Vec<graphy::core::OutputParam> = ps_node
+        .output_params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            // The accessor is the positional tuple field index (.0, .1, ...)
+            graphy::core::OutputParam::new(p.name, p.ty, format!(".{}", i))
+        })
+        .collect();
+
     NodeMetadata::new(ps_node.name, node_type, ps_node.category)
         .with_params(params)
         .with_return_type(return_type.unwrap_or_else(|| TypeInfo::new("()".to_string())))
+        .with_outputs(output_params)
         .with_exec_outputs(exec_outputs)
         .with_imports(imports)
         .with_source(ps_node.function_source)

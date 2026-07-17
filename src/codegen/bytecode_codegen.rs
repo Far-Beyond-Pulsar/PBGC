@@ -137,8 +137,11 @@ pub struct BytecodeCodegen<'a> {
     variables: HashMap<String, String>,
 
     instructions: Vec<Instruction>,
-    /// node_id → byte offset of that node's output value in the arena
-    output_offsets: HashMap<String, usize>,
+    /// node_id → OutputSlot for that node's output value in the arena.
+    /// For single-output nodes, the inner map is empty and `base_offset` is used directly.
+    /// For multi-output nodes, `base_offset` points to the packed tuple and `field_offsets`
+    /// maps pin_name → offset within the tuple.
+    output_offsets: HashMap<String, OutputSlot>,
     /// canonical key → byte offset of a previously emitted constant
     const_offsets: HashMap<String, usize>,
     /// variable name → (arena offset, size, align)
@@ -148,6 +151,15 @@ pub struct BytecodeCodegen<'a> {
     next_label: LabelId,
     visited: HashSet<String>,
     max_args_count: usize,
+}
+
+/// Describes the arena storage for a single node's output(s).
+struct OutputSlot {
+    /// Byte offset of the base of the output value (single value or packed tuple).
+    base_offset: usize,
+    /// For multi-output nodes: map from output pin name → field offset within the tuple.
+    /// Empty for single-output nodes.
+    field_offsets: HashMap<String, usize>,
 }
 
 impl<'a> BytecodeCodegen<'a> {
@@ -566,6 +578,12 @@ impl<'a> BytecodeCodegen<'a> {
     //
     // Layout comes from the compile-time return_size/return_align values baked
     // into pulsar_std::NodeMetadata by the #[blueprint] macro.  No type-string matching.
+    //
+    // For multi-output nodes (output_params non-empty), ONE slot is allocated for
+    // the entire packed tuple. Field offsets within the tuple are computed using
+    // the per-field size/align from OutputParamMeta, matching Rust's repr(Rust)
+    // layout. Consumers reference individual fields by adding the field offset
+    // to the base offset.
 
     fn alloc_output_for_meta(
         &mut self,
@@ -588,8 +606,44 @@ impl<'a> BytecodeCodegen<'a> {
         if size == 0 {
             return (0, false); // macro flagged it as void
         }
+
+        // Check for multi-output via raw pulsar_std metadata (has per-field size/align)
+        let raw_meta = pulsar_std::get_all_nodes()
+            .iter()
+            .find(|m| m.name == node_type);
+
+        if let Some(raw) = raw_meta {
+            if !raw.output_params.is_empty() {
+                // Multi-output: allocate one slot for the packed tuple
+                let offset = self.layout.alloc(size, align);
+                // Compute per-field offsets using Rust tuple layout (sequential, aligned)
+                let mut field_offsets = HashMap::new();
+                let mut field_cursor = 0usize;
+                for (i, param) in raw.output_params.iter().enumerate() {
+                    // Align cursor to this field's alignment
+                    let aligned = (field_cursor + param.align - 1) & !(param.align - 1);
+                    field_cursor = aligned;
+                    field_offsets.insert(param.name.to_string(), aligned);
+                    field_cursor += param.size;
+                    // Also store by positional name .0, .1, etc. for reverse lookup
+                    field_offsets.insert(format!(".{}", i), aligned);
+                }
+                let slot = OutputSlot {
+                    base_offset: offset,
+                    field_offsets,
+                };
+                self.output_offsets.insert(node_id.to_string(), slot);
+                return (offset, true);
+            }
+        }
+
+        // Single-output: allocate one slot for the value
         let offset = self.layout.alloc(size, align);
-        self.output_offsets.insert(node_id.to_string(), offset);
+        let slot = OutputSlot {
+            base_offset: offset,
+            field_offsets: HashMap::new(),
+        };
+        self.output_offsets.insert(node_id.to_string(), slot);
         (offset, true)
     }
 
@@ -631,11 +685,41 @@ impl<'a> BytecodeCodegen<'a> {
     ) -> Result<usize, GraphyError> {
         use graphy::analysis::DataSource;
 
+        /// Resolve a multi-output field offset for a source pin.
+        /// Returns the final arena offset (base + field_offset) if the source
+        /// has named output params, or None for single-output sources.
+        fn resolve_multi_output_offset(
+            output_offsets: &HashMap<String, OutputSlot>,
+            source_node_id: &str,
+            source_pin_id: &str,
+            graph: &GraphDescription,
+        ) -> Option<usize> {
+            let slot = output_offsets.get(source_node_id)?;
+            if slot.field_offsets.is_empty() {
+                return None; // single-output
+            }
+            // Find the output pin name by matching pin instance ID
+            let src_node = graph.nodes.get(source_node_id)?;
+            let pin_name = src_node.outputs.iter()
+                .find(|p| p.id == source_pin_id)
+                .map(|p| p.pin.name.as_str())?;
+            let field_off = slot.field_offsets.get(pin_name)
+                .or_else(|| slot.field_offsets.get(&format!(".{}", pin_name)))?;
+            Some(slot.base_offset + field_off)
+        }
+
         match self.data_resolver.get_input_source(node_id, pin_id) {
             Some(DataSource::Connection { source_node_id, .. }) => {
                 let sid = source_node_id.to_string();
-                if let Some(&off) = self.output_offsets.get(&sid) {
-                    return Ok(off);
+                // Check for multi-output first
+                if let Some(final_off) = resolve_multi_output_offset(
+                    &self.output_offsets, &sid, pin_id, self.graph
+                ) {
+                    return Ok(final_off);
+                }
+                // Fall back to single-output base offset
+                if let Some(slot) = self.output_offsets.get(&sid) {
+                    return Ok(slot.base_offset);
                 }
 
                 let node = self.graph.nodes.get(&sid).cloned().ok_or_else(|| {
@@ -654,28 +738,30 @@ impl<'a> BytecodeCodegen<'a> {
                     let input_offsets = self.collect_input_offsets_for(&node, &meta)?;
                     self.max_args_count = self.max_args_count.max(input_offsets.len());
 
-                    let is_void = meta.return_type.as_ref().map(|rt| rt.type_string == "()").unwrap_or(true);
-                    let (output_offset, has_output) = if is_void {
-                        (0, false)
-                    } else {
-                        let (size, align) = self.metadata_provider.return_layout(&node.node_type).unwrap_or((8, 8));
-                        if size == 0 {
-                            (0, false)
-                        } else {
-                            (self.layout.alloc(size, align), true)
+                    // Use alloc_output_for_meta which handles both single and multi-output
+                    let (output_offset, has_output) =
+                        self.alloc_output_for_meta(&node.id, &node.node_type, &meta);
+
+                    if has_output {
+                        let type_slot_offsets = self.collect_type_slot_offsets_for(&node)?;
+
+                        self.instructions.push(Instruction::Call {
+                            fn_ptr: 0,
+                            node_type: meta.name.to_string(),
+                            input_offsets,
+                            output_offset,
+                            has_output,
+                            type_slot_offsets,
+                        });
+
+                        // For multi-output, resolve the field offset for the specific pin
+                        if let Some(final_off) = resolve_multi_output_offset(
+                            &self.output_offsets, &sid, pin_id, self.graph
+                        ) {
+                            return Ok(final_off);
                         }
-                    };
-
-                    let type_slot_offsets = self.collect_type_slot_offsets_for(&node)?;
-
-                    self.instructions.push(Instruction::Call {
-                        fn_ptr: 0,
-                        node_type: meta.name.to_string(),
-                        input_offsets,
-                        output_offset,
-                        has_output,
-                        type_slot_offsets,
-                    });
+                        return Ok(output_offset);
+                    }
 
                     return Ok(output_offset);
                 }

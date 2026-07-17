@@ -499,11 +499,24 @@ impl<'a> BlueprintCodeGenerator<'a> {
         // Collect arguments
         let args = self.collect_arguments(node, node_meta)?;
 
-        // Check if this function returns a value
-        let has_return = node_meta.return_type.is_some();
+        // Use effective_outputs() which handles both multi-output (output_params)
+        // and single-output (synthesized "result" pin from return_type).
+        let outputs = node_meta.effective_outputs();
+        let is_multi = outputs.len() > 1;
 
-        if has_return {
-            // Store result in variable
+        if is_multi {
+            // Multi-output: store the whole tuple in a temp variable.
+            // Consumers reference fields via accessor (.0, .1, ...).
+            let tmp_var = format!("__tmp_{}", &node.id[..8.min(node.id.len())]);
+            code.push_str(&format!(
+                "{}let {} = {}({});\n",
+                indent,
+                tmp_var,
+                node_meta.name,
+                args.join(", ")
+            ));
+        } else if !outputs.is_empty() {
+            // Single output (the default "result" pin)
             let result_var = self.data_resolver
                 .get_result_variable(&node.id)
                 .ok_or_else(|| GraphyError::Custom(format!("No result variable for node: {}", node.id)))?;
@@ -516,7 +529,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
                 args.join(", ")
             ));
         } else {
-            // Just call the function
+            // Void return
             code.push_str(&format!(
                 "{}{}({});\n",
                 indent,
@@ -703,8 +716,32 @@ impl<'a> BlueprintCodeGenerator<'a> {
     fn generate_input_expression(&self, node_id: &str, pin_id: &str) -> Result<String, GraphyError> {
         use graphy::analysis::DataSource;
 
+        /// Resolve the output pin name on the source node for a multi-output accessor.
+        fn get_multi_output_accessor(
+            metadata_provider: &BlueprintMetadataProvider,
+            graph: &GraphDescription,
+            source_node_id: &str,
+            source_pin_id: &str,
+        ) -> Option<String> {
+            let src_node = graph.nodes.get(source_node_id)?;
+            let src_meta = metadata_provider.get_node_metadata(&src_node.node_type)?;
+            // Find the pin name by matching pin instance ID
+            let pin_name = src_node.outputs.iter()
+                .find(|p| p.id == source_pin_id)
+                .map(|p| p.pin.name.as_str())?;
+            let outputs = src_meta.effective_outputs();
+            if outputs.len() <= 1 {
+                return None;
+            }
+            outputs.iter()
+                .find(|o| o.name == pin_name)
+                .and_then(|o| {
+                    if o.accessor.is_empty() { None } else { Some(o.accessor.clone()) }
+                })
+        }
+
         match self.data_resolver.get_input_source(node_id, pin_id) {
-            Some(DataSource::Connection { source_node_id, source_pin: _ }) => {
+            Some(DataSource::Connection { source_node_id, source_pin }) => {
                 let source_node = self.graph.nodes.get(source_node_id)
                     .ok_or_else(|| GraphyError::NodeNotFound(source_node_id.clone()))?;
 
@@ -735,16 +772,36 @@ impl<'a> BlueprintCodeGenerator<'a> {
                     if node_meta.node_type == NodeTypes::pure {
                         if self.should_materialize_pure_result(source_node_id) {
                             if let Some(var_name) = self.data_resolver.get_result_variable(source_node_id) {
+                                // Check for multi-output accessor
+                                if let Some(acc) = get_multi_output_accessor(
+                                    self.metadata_provider, self.graph, source_node_id, &source_pin
+                                ) {
+                                    return Ok(format!("{}{}", var_name, acc));
+                                }
                                 return Ok(var_name.clone());
                             }
                         }
-                        return self.generate_pure_node_expression(source_node);
+                        let expr = self.generate_pure_node_expression(source_node)?;
+                        // Check for multi-output accessor on the inline expression
+                        if let Some(acc) = get_multi_output_accessor(
+                            self.metadata_provider, self.graph, source_node_id, &source_pin
+                        ) {
+                            return Ok(format!("({}){}", expr, acc));
+                        }
+                        return Ok(expr);
                     }
                 }
 
                 // Non-pure: use result variable
                 if let Some(var_name) = self.data_resolver.get_result_variable(source_node_id) {
-                    Ok(var_name.clone())
+                    // Check for multi-output accessor
+                    if let Some(acc) = get_multi_output_accessor(
+                        self.metadata_provider, self.graph, source_node_id, &source_pin
+                    ) {
+                        Ok(format!("{}{}", var_name, acc))
+                    } else {
+                        Ok(var_name.clone())
+                    }
                 } else {
                     Err(GraphyError::Custom(format!("No variable for source node: {}", source_node_id)))
                 }
