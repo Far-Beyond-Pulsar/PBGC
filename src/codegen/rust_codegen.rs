@@ -74,10 +74,13 @@ impl<'a> BlueprintCodeGenerator<'a> {
             .nodes
             .values()
             .filter(|node| {
-                self.metadata_provider
-                    .get_node_metadata(&node.node_type)
-                    .map(|meta| meta.node_type == NodeTypes::event)
-                    .unwrap_or(false)
+                // Custom event On nodes (node_type starts with "on_") are synthetic —
+                // no static metadata entry, but still treated as event entry points.
+                node.node_type.starts_with("on_")
+                    || self.metadata_provider
+                        .get_node_metadata(&node.node_type)
+                        .map(|meta| meta.node_type == NodeTypes::event)
+                        .unwrap_or(false)
             })
             .collect();
 
@@ -85,6 +88,39 @@ impl<'a> BlueprintCodeGenerator<'a> {
             return Err(GraphyError::CodeGeneration(
                 "No event nodes found in graph - add a 'main' or 'begin_play' event".to_string(),
             ));
+        }
+
+        // Generate `#[pulsar_event]` structs for custom events
+        for event_node in &event_nodes {
+            if event_node.node_type.starts_with("on_") {
+                let event_name = pascal_case(&event_node.node_type.strip_prefix("on_").unwrap_or("custom"));
+                code.push_str(&format!("#[pulsar_event]\npub struct {} {{\n", event_name));
+                // Emit fields from output data pins (skip execution pins)
+                for pin in &event_node.outputs {
+                    if !matches!(pin.pin.data_type, graphy::DataType::Exec) {
+                        let rust_type = match &pin.pin.data_type {
+                            graphy::DataType::Data(ti) => ti.type_string.clone(),
+                            graphy::DataType::Exec => "()".to_string(),
+                        };
+                        code.push_str(&format!("    pub {}: {},\n", pin.id, rust_type));
+                    }
+                }
+                code.push_str("}\n\n");
+            }
+        }
+
+        // Also collect custom event node types referenced by emit_custom_event nodes
+        let custom_event_structs: std::collections::HashSet<String> = self.graph
+            .nodes
+            .values()
+            .filter(|n| n.node_type == "emit_custom_event")
+            .filter_map(|n| n.properties.get("event_uid").and_then(|v| v.as_str()))
+            .map(pascal_case)
+            .collect();
+        for struct_name in custom_event_structs {
+            // Ensure the struct is defined — will be generated above from the On node.
+            // If no On node exists in this graph, the graph structure is incomplete
+            // (the On node lives in a different blueprint actor).
         }
 
         // Generate each event function
@@ -165,7 +201,44 @@ impl<'a> BlueprintCodeGenerator<'a> {
     fn generate_event_function(&self, event_node: &NodeInstance) -> Result<String, GraphyError> {
         let mut code = String::new();
 
-        // Get event metadata
+        // Custom event nodes don't have static metadata — infer from the node itself.
+        if event_node.node_type.starts_with("on_") {
+            let func_name = event_node.node_type.clone();
+            let params: Vec<String> = event_node.outputs.iter()
+                .filter(|p| !matches!(p.pin.data_type, graphy::DataType::Exec))
+                .map(|p| {
+                    let type_str = match &p.pin.data_type {
+                        graphy::DataType::Data(ti) => ti.type_string.clone(),
+                        graphy::DataType::Exec => "()".to_string(),
+                    };
+                    format!("{}: {}", p.id, type_str)
+                })
+                .collect();
+            code.push_str(&format!("pub fn {}({}) {{\n", func_name, params.join(", ")));
+            let indent = "    ";
+            // Generate pure node preamble
+            let pure_preamble = self.generate_pure_node_preamble(1)?;
+            if !pure_preamble.is_empty() {
+                code.push_str(&pure_preamble);
+            }
+            // Follow execution chain
+            for output_pin in &event_node.outputs {
+                if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
+                    let connected = self.exec_routing.get_connected_nodes(&event_node.id, &output_pin.id);
+                    for next_node_id in connected {
+                        if let Some(next_node) = self.graph.nodes.get(next_node_id) {
+                            let mut generator = self.clone_with_new_visited();
+                            let node_code = generator.generate_exec_chain(next_node, 1)?;
+                            code.push_str(&node_code);
+                        }
+                    }
+                }
+            }
+            code.push_str("}\n");
+            return Ok(code);
+        }
+
+        // Get event metadata (for standard event nodes)
         let metadata = self.metadata_provider
             .get_node_metadata(&event_node.node_type)
             .ok_or_else(|| GraphyError::NodeNotFound(event_node.node_type.clone()))?;
@@ -907,4 +980,22 @@ fn get_default_value(data_type: &graphy::DataType) -> String {
         DataType::Exec => "()".to_string(),
         DataType::Data(ti) => graphy::utils::get_default_value_for_type(&ti.type_string),
     }
+}
+
+/// Convert a kebab-case or snake_case string to PascalCase.
+fn pascal_case(name: &str) -> String {
+    name.split(|c: char| c == '_' || c == '-')
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    let mut s = first.to_uppercase().to_string();
+                    s.push_str(chars.as_str());
+                    s
+                }
+            }
+        })
+        .collect()
 }

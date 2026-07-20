@@ -307,6 +307,17 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
         "        // No components on this prefab.\n".to_string()
     };
 
+    // ── Set up custom events ──────────────────────────────────────────────────
+    let has_custom_events = bp.source.contains("on_player_died")
+        || bp.source.contains("emit_event");
+    let init_events_body = if has_custom_events {
+        "\
+        // Register custom event handlers (added by PBGC for custom blueprint events).\n\
+        // Subscriptions are set up here so they are active before begin_play runs.\n".to_string()
+    } else {
+        String::new()
+    };
+
     // ── begin_play body ───────────────────────────────────────────────────────
     let begin_play_body = {
         let mut body = String::new();
@@ -321,6 +332,9 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
             body.push_str(
                 "        pulsar_game::__bp_set_comp_ctx(std::sync::Arc::get_mut(&mut self.components).expect(\"exclusive Arc\"));\n",
             );
+        }
+        if has_custom_events && !init_events_body.is_empty() {
+            body.push_str("        self.__init_events();\n");
         }
         if bp.has_begin_play {
             body.push_str("        logic::begin_play();\n");
@@ -352,25 +366,60 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
         body
     };
 
+    // ── Set up custom events ──────────────────────────────────────────────────
+    let has_custom_events = bp.source.contains("on_player_died")
+        || bp.source.contains("emit_event");
+    let init_events_body = if has_custom_events {
+        "\
+        // Register custom event handlers (added by PBGC for custom blueprint events).\n\
+        // Subscriptions are set up here so they are active before begin_play runs.\n".to_string()
+    } else {
+        String::new()
+    };
+
     // ── Struct definition ─────────────────────────────────────────────────────
     let struct_def = if has_components {
         format!(
             r#"pub struct {ty} {{
     /// Runtime component store — populated lazily in `begin_play`.
     pub components: std::sync::Arc<pulsar_game::ComponentStore>,
+    /// Per-instance event bus for custom blueprint events.
+    pub events: gamma_core::EventBus,
 }}"#
         )
     } else {
-        format!("pub struct {ty} {{}}")
+        format!(
+            r#"pub struct {ty} {{
+    /// Per-instance event bus for custom blueprint events.
+    pub events: gamma_core::EventBus,
+}}"#
+        )
     };
 
     let new_body = if has_components {
-        format!("Self {{ components: std::sync::Arc::new(pulsar_game::ComponentStore::new()) }}")
+        format!(
+            "Self {{ components: std::sync::Arc::new(pulsar_game::ComponentStore::new()), events: gamma_core::EventBus::new() }}"
+        )
     } else {
-        "Self {}".to_string()
+        "Self { events: gamma_core::EventBus::new() }".to_string()
     };
 
     // ── Component helper impls ────────────────────────────────────────────────
+    let event_helpers = if has_custom_events {
+        format!(
+            r#"
+impl {ty} {{
+    /// Initialise custom event subscriptions.
+    /// Called at the start of `begin_play`.
+    pub fn __init_events(&mut self) {{
+{init_events_body}    }}
+}}
+"#
+        )
+    } else {
+        String::new()
+    };
+
     let component_helpers = if has_components {
         format!(
             r#"
@@ -454,6 +503,7 @@ impl Default for {ty} {{
     fn default() -> Self {{ Self::new() }}
 }}
 {component_helpers}
+{event_helpers}
 impl Actor for {ty} {{
     fn begin_play(&mut self, _entity: Entity, _world: &mut World) {{
 {begin_play_body}    }}

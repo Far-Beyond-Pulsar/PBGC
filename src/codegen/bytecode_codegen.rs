@@ -266,10 +266,16 @@ impl<'a> BytecodeCodegen<'a> {
         }
         self.instructions.push(Instruction::Return);
 
-        let meta = self
-            .metadata_provider
-            .get_node_metadata(&event.node_type)
-            .ok_or_else(|| GraphyError::NodeNotFound(event.node_type.clone()))?;
+        // Custom event On nodes (node_type starts with "on_") — no static metadata.
+        let event_name = if event.node_type.starts_with("on_") {
+            event.node_type.clone()
+        } else {
+            let meta = self
+                .metadata_provider
+                .get_node_metadata(&event.node_type)
+                .ok_or_else(|| GraphyError::NodeNotFound(event.node_type.clone()))?;
+            meta.name.clone()
+        };
 
         let instrs = std::mem::replace(&mut self.instructions, prev_instructions);
         let arena_size = self.layout.next_offset;
@@ -280,7 +286,7 @@ impl<'a> BytecodeCodegen<'a> {
         self.const_offsets = prev_const_offsets;
         self.max_args_count = prev_max_args;
 
-        let mut prog = BpProgram::new(meta.name.clone());
+        let mut prog = BpProgram::new(event_name);
         prog.instructions = instrs;
         prog.arena_size = arena_size;
         prog.max_args_count = max_args_count;
@@ -299,6 +305,11 @@ impl<'a> BytecodeCodegen<'a> {
             return self.emit_setter(node);
         }
 
+        // Custom event dispatch node — emit a call to `emit_event` native function
+        if node.node_type == "emit_custom_event" {
+            return self.emit_custom_event_dispatch(node);
+        }
+
         let meta = self
             .metadata_provider
             .get_node_metadata(&node.node_type)
@@ -310,6 +321,50 @@ impl<'a> BytecodeCodegen<'a> {
             NodeTypes::fn_ => self.emit_fn_node(node, &meta),
             NodeTypes::control_flow => self.emit_control_flow(node, &meta),
         }
+    }
+
+    fn emit_custom_event_dispatch(&mut self, node: &NodeInstance) -> Result<(), GraphyError> {
+        let event_uid = node
+            .properties
+            .get("event_uid")
+            .cloned()
+            .ok_or_else(|| {
+                GraphyError::Custom(format!(
+                    "emit_custom_event node '{}' has no event_uid property",
+                    node.id
+                ))
+            })?;
+
+        // Collect input offsets for all data pins (skip execution inputs)
+        let data_pins: Vec<_> = node
+            .inputs
+            .iter()
+            .filter(|p| !matches!(p.pin.data_type, DataType::Exec))
+            .collect();
+
+        let mut input_offsets = Vec::new();
+        for pin in &data_pins {
+            let offset = self.resolve_input_offset(
+                &node.id,
+                &node.node_type,
+                &pin.id,
+                &pin.pin.name,
+            )?;
+            input_offsets.push(offset);
+        }
+
+        self.max_args_count = self.max_args_count.max(input_offsets.len());
+        let output_offset = 0; // emit_event has no return value
+
+        self.instructions.push(Instruction::Call {
+            fn_ptr: 0,
+            node_type: "emit_event".to_string(),
+            input_offsets,
+            output_offset,
+            has_output: false,
+            type_slot_offsets: Vec::new(),
+        });
+        self.follow_exec_outputs(node)
     }
 
     fn emit_fn_node(
