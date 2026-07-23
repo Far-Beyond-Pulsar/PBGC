@@ -156,6 +156,42 @@ fn add_node(id: &str, ca: Option<f64>, cb: Option<f64>) -> NodeInstance {
     n
 }
 
+fn get_bit_node(id: &str, value: i64, bit_index: i64) -> NodeInstance {
+    let mut n = NodeInstance::new(id, "get_bit", Position { x: 100.0, y: 0.0 });
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_value"),
+        Pin::new(
+            &format!("{id}_value"),
+            "value",
+            DataType::typed("i64"),
+            PinType::Input,
+        ),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_bit_index"),
+        Pin::new(
+            &format!("{id}_bit_index"),
+            "bit_index",
+            DataType::typed("i64"),
+            PinType::Input,
+        ),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_result"),
+        Pin::new(
+            &format!("{id}_result"),
+            "result",
+            DataType::typed("i64"),
+            PinType::Output,
+        ),
+    ));
+    n.properties
+        .insert(format!("{id}_value"), serde_json::json!(value));
+    n.properties
+        .insert(format!("{id}_bit_index"), serde_json::json!(bit_index));
+    n
+}
+
 fn mul_node(id: &str, ca: Option<f64>, cb: Option<f64>) -> NodeInstance {
     let mut n = NodeInstance::new(id, "multiply", Position { x: 100.0, y: 0.0 });
     n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "a", DataType::typed("i64"), PinType::Input)));
@@ -295,6 +331,26 @@ fn test_node_type_embedded_in_call_instruction() {
         matches!(i, Instruction::Call { node_type, .. } if node_type == "add")
     });
     assert!(has_add, "should have a Call with node_type='add'");
+}
+
+#[test]
+fn standard_nodes_with_get_prefix_are_not_variable_getters() {
+    let mut g = GraphDescription::new("get_bit_is_standard_node");
+    g.add_node(begin("be"));
+    g.add_node(get_bit_node("bit", 10, 1));
+    g.add_node(assert_eq_int_node("chk", 1));
+    g.add_connection(exec("begin", "be", "chk", "chk_e"));
+    g.add_connection(data("bit", "bit_result", "chk", "chk_a"));
+
+    let programs = compile_graph_to_bytecode(&g).expect("compile get_bit bytecode");
+    assert!(programs.iter().any(|program| {
+        program.instructions.iter().any(|instruction| {
+            matches!(instruction, Instruction::Call { node_type, .. } if node_type == "get_bit")
+        })
+    }));
+
+    let rust = compile_graph(&g).expect("compile get_bit Rust");
+    assert!(rust.contains("get_bit"));
 }
 
 #[test]

@@ -300,8 +300,11 @@ impl<'a> BlueprintCodeGenerator<'a> {
                 .get(node_id)
                 .ok_or_else(|| GraphyError::NodeNotFound(node_id.clone()))?;
 
-            let expr = if node.node_type.starts_with("get_") {
-                let var_name = node.node_type.strip_prefix("get_").unwrap();
+            let expr = if let Some(var_name) = node
+                .node_type
+                .strip_prefix("get_")
+                .filter(|name| self.variables.contains_key(*name))
+            {
                 let var_type = self
                     .variables
                     .get(var_name)
@@ -374,10 +377,18 @@ impl<'a> BlueprintCodeGenerator<'a> {
         }
 
         // ── Variable nodes ────────────────────────────────────────────────────
-        if node.node_type.starts_with("get_") {
+        if node
+            .node_type
+            .strip_prefix("get_")
+            .is_some_and(|name| self.variables.contains_key(name))
+        {
             // Getter nodes are pure (no exec chain), skip
             return Ok(code);
-        } else if node.node_type.starts_with("set_") {
+        } else if node
+            .node_type
+            .strip_prefix("set_")
+            .is_some_and(|name| self.variables.contains_key(name))
+        {
             // Setter nodes have exec chain
             return self.generate_setter_node(node, indent_level);
         }
@@ -824,8 +835,11 @@ impl<'a> BlueprintCodeGenerator<'a> {
                 }
 
                 // Check if source is a variable getter
-                if source_node.node_type.starts_with("get_") {
-                    let var_name = source_node.node_type.strip_prefix("get_").unwrap();
+                if let Some(var_name) = source_node
+                    .node_type
+                    .strip_prefix("get_")
+                    .filter(|name| self.variables.contains_key(*name))
+                {
                     let var_type = self.variables.get(var_name)
                         .ok_or_else(|| GraphyError::Custom(format!("Variable '{}' not found", var_name)))?;
 
