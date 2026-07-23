@@ -219,6 +219,12 @@ mod tests {
                         .contains_key("src/classes/player_class/mod.rs"));
                 assert!(generated
                         .files
+                        .contains_key("src/classes/player_class/events/mod.rs"));
+                assert!(generated
+                        .files
+                        .contains_key("src/classes/player_class/events/events.rs"));
+                assert!(generated
+                        .files
                         .contains_key("src/classes/player_class/vars/mod.rs"));
 
                 let _ = std::fs::remove_dir_all(&root);
