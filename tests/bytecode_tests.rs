@@ -544,10 +544,10 @@ fn deep_pure_graph(n: usize) -> GraphDescription {
 
 #[test]
 fn deep_pure_chain_compiles_without_stack_growth() {
-    let programs = compile_graph_to_bytecode(&deep_pure_graph(50_000))
+    let programs = compile_graph_to_bytecode(&deep_pure_graph(500_000))
         .expect("deep pure graph should compile without stack overflow");
     assert_eq!(programs.len(), 1);
-    assert!(programs[0].instructions.len() >= 50_000);
+    assert!(programs[0].instructions.len() >= 500_000);
 }
 
 #[test]

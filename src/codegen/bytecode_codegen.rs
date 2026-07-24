@@ -150,6 +150,7 @@ pub struct BytecodeCodegen<'a> {
     layout: LayoutAllocator,
     next_label: LabelId,
     visited: HashSet<String>,
+    in_progress: HashSet<String>,
     max_args_count: usize,
 }
 
@@ -183,6 +184,7 @@ impl<'a> BytecodeCodegen<'a> {
             layout: LayoutAllocator::new(),
             next_label: 0,
             visited: HashSet::new(),
+            in_progress: HashSet::new(),
             max_args_count: 0,
         }
     }
@@ -431,6 +433,10 @@ impl<'a> BytecodeCodegen<'a> {
             source_offset,
             output_offset,
             size: var_size,
+        });
+        self.output_offsets.insert(node.id.clone(), OutputSlot {
+            base_offset: output_offset,
+            field_offsets: HashMap::new(),
         });
         Ok(output_offset)
     }
@@ -784,6 +790,10 @@ impl<'a> BytecodeCodegen<'a> {
                         continue;
                     }
 
+                    if !self.in_progress.insert(node_id.clone()) {
+                        return Err(GraphyError::CyclicDependency);
+                    }
+
                     let node = self.graph.nodes.get(&node_id).ok_or_else(|| {
                         GraphyError::Custom(format!("Source node '{}' not found", node_id))
                     })?;
@@ -795,6 +805,7 @@ impl<'a> BytecodeCodegen<'a> {
                     {
                         let node = node.clone();
                         self.emit_getter(&node)?;
+                        self.in_progress.remove(&node_id);
                         scheduled.remove(&node_id);
                         continue;
                     }
@@ -810,6 +821,7 @@ impl<'a> BytecodeCodegen<'a> {
                         })?;
 
                     if meta.node_type != NodeTypes::pure {
+                        self.in_progress.remove(&node_id);
                         return Err(GraphyError::Custom(format!(
                             "No arena offset for node '{}'",
                             node_id
@@ -877,6 +889,7 @@ impl<'a> BytecodeCodegen<'a> {
                         });
                     }
 
+                    self.in_progress.remove(&node_id);
                     scheduled.remove(&node_id);
                 }
             }
