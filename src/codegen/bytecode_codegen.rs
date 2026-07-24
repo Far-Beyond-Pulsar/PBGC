@@ -735,6 +735,156 @@ impl<'a> BytecodeCodegen<'a> {
         Ok(offsets)
     }
 
+    /// Returns the arena offset of one of a node's outputs after that node has
+    /// been emitted. Multi-output nodes store their fields in a packed slot;
+    /// single-output nodes use the slot base directly.
+    fn output_offset_for(&self, source_node_id: &str, source_pin_id: &str) -> Option<usize> {
+        let slot = self.output_offsets.get(source_node_id)?;
+        if slot.field_offsets.is_empty() {
+            return Some(slot.base_offset);
+        }
+
+        let source_node = self.graph.nodes.get(source_node_id)?;
+        let pin_name = source_node
+            .outputs
+            .iter()
+            .find(|pin| pin.id == source_pin_id)
+            .map(|pin| pin.pin.name.as_str())?;
+        let field_offset = slot
+            .field_offsets
+            .get(pin_name)
+            .or_else(|| slot.field_offsets.get(&format!(".{}", pin_name)))?;
+        Some(slot.base_offset + field_offset)
+    }
+
+    /// Emits the pure-node dependency closure for `source_node_id` without
+    /// recursing through a graph-shaped call stack. Deep Blueprint graphs are
+    /// common enough that recursive input resolution can otherwise overflow a
+    /// normal test or runtime thread stack.
+    fn ensure_connected_output(&mut self, source_node_id: &str) -> Result<(), GraphyError> {
+        use graphy::analysis::DataSource;
+
+        enum ResolutionTask {
+            Visit(String),
+            Emit(String),
+        }
+
+        if self.output_offsets.contains_key(source_node_id) {
+            return Ok(());
+        }
+
+        let mut tasks = vec![ResolutionTask::Visit(source_node_id.to_string())];
+        let mut scheduled = HashSet::from([source_node_id.to_string()]);
+
+        while let Some(task) = tasks.pop() {
+            match task {
+                ResolutionTask::Visit(node_id) => {
+                    if self.output_offsets.contains_key(&node_id) {
+                        scheduled.remove(&node_id);
+                        continue;
+                    }
+
+                    let node = self.graph.nodes.get(&node_id).ok_or_else(|| {
+                        GraphyError::Custom(format!("Source node '{}' not found", node_id))
+                    })?;
+
+                    if node
+                        .node_type
+                        .strip_prefix("get_")
+                        .is_some_and(|name| self.variables.contains_key(name))
+                    {
+                        let node = node.clone();
+                        self.emit_getter(&node)?;
+                        scheduled.remove(&node_id);
+                        continue;
+                    }
+
+                    let meta = self
+                        .metadata_provider
+                        .get_node_metadata(&node.node_type)
+                        .ok_or_else(|| {
+                            GraphyError::Custom(format!(
+                                "No metadata for node '{}'",
+                                node.node_type
+                            ))
+                        })?;
+
+                    if meta.node_type != NodeTypes::pure {
+                        return Err(GraphyError::Custom(format!(
+                            "No arena offset for node '{}'",
+                            node_id
+                        )));
+                    }
+
+                    tasks.push(ResolutionTask::Emit(node_id.clone()));
+                    for param in &meta.params {
+                        let pin = node
+                            .inputs
+                            .iter()
+                            .find(|pin| pin.pin.name == param.name)
+                            .ok_or_else(|| {
+                                GraphyError::Custom(format!(
+                                    "Input pin '{}' not found on node '{}'",
+                                    param.name, node.id
+                                ))
+                            })?;
+
+                        if let Some(DataSource::Connection { source_node_id, .. }) =
+                            self.data_resolver.get_input_source(&node.id, &pin.id)
+                        {
+                            if !self.output_offsets.contains_key(source_node_id)
+                                && scheduled.insert(source_node_id.to_string())
+                            {
+                                tasks.push(ResolutionTask::Visit(source_node_id.to_string()));
+                            }
+                        }
+                    }
+                }
+                ResolutionTask::Emit(node_id) => {
+                    if self.output_offsets.contains_key(&node_id) {
+                        scheduled.remove(&node_id);
+                        continue;
+                    }
+
+                    let node = self.graph.nodes.get(&node_id).cloned().ok_or_else(|| {
+                        GraphyError::Custom(format!("Source node '{}' not found", node_id))
+                    })?;
+                    let meta = self
+                        .metadata_provider
+                        .get_node_metadata(&node.node_type)
+                        .ok_or_else(|| {
+                            GraphyError::Custom(format!(
+                                "No metadata for node '{}'",
+                                node.node_type
+                            ))
+                        })?
+                        .clone();
+
+                    let input_offsets = self.collect_input_offsets_for(&node, &meta)?;
+                    self.max_args_count = self.max_args_count.max(input_offsets.len());
+                    let (output_offset, has_output) =
+                        self.alloc_output_for_meta(&node.id, &node.node_type, &meta);
+
+                    if has_output {
+                        let type_slot_offsets = self.collect_type_slot_offsets_for(&node)?;
+                        self.instructions.push(Instruction::Call {
+                            fn_ptr: 0,
+                            node_type: meta.name.to_string(),
+                            input_offsets,
+                            output_offset,
+                            has_output,
+                            type_slot_offsets,
+                        });
+                    }
+
+                    scheduled.remove(&node_id);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn resolve_input_offset(
         &mut self,
         node_id: &str,
@@ -744,92 +894,18 @@ impl<'a> BytecodeCodegen<'a> {
     ) -> Result<usize, GraphyError> {
         use graphy::analysis::DataSource;
 
-        /// Resolve a multi-output field offset for a source pin.
-        /// Returns the final arena offset (base + field_offset) if the source
-        /// has named output params, or None for single-output sources.
-        fn resolve_multi_output_offset(
-            output_offsets: &HashMap<String, OutputSlot>,
-            source_node_id: &str,
-            source_pin_id: &str,
-            graph: &GraphDescription,
-        ) -> Option<usize> {
-            let slot = output_offsets.get(source_node_id)?;
-            if slot.field_offsets.is_empty() {
-                return None; // single-output
-            }
-            // Find the output pin name by matching pin instance ID
-            let src_node = graph.nodes.get(source_node_id)?;
-            let pin_name = src_node.outputs.iter()
-                .find(|p| p.id == source_pin_id)
-                .map(|p| p.pin.name.as_str())?;
-            let field_off = slot.field_offsets.get(pin_name)
-                .or_else(|| slot.field_offsets.get(&format!(".{}", pin_name)))?;
-            Some(slot.base_offset + field_off)
-        }
-
         match self.data_resolver.get_input_source(node_id, pin_id) {
-            Some(DataSource::Connection { source_node_id, .. }) => {
-                let sid = source_node_id.to_string();
-                // Check for multi-output first
-                if let Some(final_off) = resolve_multi_output_offset(
-                    &self.output_offsets, &sid, pin_id, self.graph
-                ) {
-                    return Ok(final_off);
-                }
-                // Fall back to single-output base offset
-                if let Some(slot) = self.output_offsets.get(&sid) {
-                    return Ok(slot.base_offset);
-                }
-
-                let node = self.graph.nodes.get(&sid).cloned().ok_or_else(|| {
-                    GraphyError::Custom(format!("Source node '{}' not found", sid))
-                })?;
-
-                if node
-                    .node_type
-                    .strip_prefix("get_")
-                    .is_some_and(|name| self.variables.contains_key(name))
-                {
-                    return self.emit_getter(&node);
-                }
-
-                let meta = self.metadata_provider.get_node_metadata(&node.node_type).ok_or_else(|| {
-                    GraphyError::Custom(format!("No metadata for node '{}'", node.node_type))
-                })?.clone();
-
-                if meta.node_type == NodeTypes::pure {
-                    let input_offsets = self.collect_input_offsets_for(&node, &meta)?;
-                    self.max_args_count = self.max_args_count.max(input_offsets.len());
-
-                    // Use alloc_output_for_meta which handles both single and multi-output
-                    let (output_offset, has_output) =
-                        self.alloc_output_for_meta(&node.id, &node.node_type, &meta);
-
-                    if has_output {
-                        let type_slot_offsets = self.collect_type_slot_offsets_for(&node)?;
-
-                        self.instructions.push(Instruction::Call {
-                            fn_ptr: 0,
-                            node_type: meta.name.to_string(),
-                            input_offsets,
-                            output_offset,
-                            has_output,
-                            type_slot_offsets,
-                        });
-
-                        // For multi-output, resolve the field offset for the specific pin
-                        if let Some(final_off) = resolve_multi_output_offset(
-                            &self.output_offsets, &sid, pin_id, self.graph
-                        ) {
-                            return Ok(final_off);
-                        }
-                        return Ok(output_offset);
-                    }
-
-                    return Ok(output_offset);
-                }
-
-                Err(GraphyError::Custom(format!("No arena offset for node '{}'", sid)))
+            Some(DataSource::Connection {
+                source_node_id,
+                source_pin,
+            }) => {
+                self.ensure_connected_output(source_node_id)?;
+                self.output_offset_for(source_node_id, source_pin).ok_or_else(|| {
+                    GraphyError::Custom(format!(
+                        "No arena offset for output '{}.{}'",
+                        source_node_id, source_pin
+                    ))
+                })
             }
 
             Some(DataSource::Constant(val)) => {
