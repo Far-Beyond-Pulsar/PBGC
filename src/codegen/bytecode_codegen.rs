@@ -301,7 +301,11 @@ impl<'a> BytecodeCodegen<'a> {
         }
         self.visited.insert(node.id.clone());
 
-        if node.node_type.starts_with("set_") {
+        if node
+            .node_type
+            .strip_prefix("set_")
+            .is_some_and(|name| self.variables.contains_key(name))
+        {
             return self.emit_setter(node);
         }
 
@@ -781,7 +785,11 @@ impl<'a> BytecodeCodegen<'a> {
                     GraphyError::Custom(format!("Source node '{}' not found", sid))
                 })?;
 
-                if node.node_type.starts_with("get_") {
+                if node
+                    .node_type
+                    .strip_prefix("get_")
+                    .is_some_and(|name| self.variables.contains_key(name))
+                {
                     return self.emit_getter(&node);
                 }
 
