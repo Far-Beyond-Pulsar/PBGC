@@ -221,6 +221,12 @@ fn branch_node(id: &str) -> NodeInstance {
     n
 }
 
+fn getter_node(id: &str, var_name: &str) -> NodeInstance {
+    let mut n = NodeInstance::new(id, &format!("get_{}", var_name), Position { x: 100.0, y: 0.0 });
+    n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::typed("i64"), PinType::Output)));
+    n
+}
+
 fn assert_eq_int_node(id: &str, expected: i64) -> NodeInstance {
     let mut n = NodeInstance::new(id, "assert_eq_int", Position { x: 400.0, y: 0.0 });
     n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec",     DataType::Exec, PinType::Input)));
@@ -583,5 +589,70 @@ fn test_timing_vm_execute_1000_times() {
     }
     println!("[timing] 1000 × 10-node VM: {:?} ({:.2}µs/run)",
         t.elapsed(), t.elapsed().as_micros() as f64 / 1000.0);
+}
+
+// ── Cycle detection ──────────────────────────────────────────────────────────
+
+#[test]
+fn pure_dependency_cycle_detected() {
+    use graphy::GraphyError;
+    let mut g = GraphDescription::new("cycle");
+    g.add_node(begin("be"));
+    // A -> B -> C -> A pure cycle
+    g.add_node(add_node("a", Some(1.0), None));
+    g.add_node(add_node("b", None, None));
+    g.add_node(add_node("c", None, None));
+    g.add_connection(data("a", "a_r", "b", "b_a"));
+    g.add_connection(data("b", "b_r", "c", "c_a"));
+    g.add_connection(data("c", "c_r", "a", "a_b"));
+    // Trigger compilation by connecting a pure node to an exec path
+    g.add_node(assert_eq_int_node("chk", 0));
+    g.add_connection(exec("begin", "be", "chk", "chk_e"));
+    g.add_connection(data("a", "a_r", "chk", "chk_a"));
+
+    let result = compile_graph_to_bytecode(&g);
+    assert!(result.is_err(), "expected cyclic dependency error");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, GraphyError::CyclicDependency) ||
+        matches!(&err, GraphyError::Custom(msg) if msg.contains("Cyclic dependency")),
+        "expected cycle error, got {:?}",
+        err
+    );
+}
+
+// ── Getter deduplication ────────────────────────────────────────────────────
+
+#[test]
+fn getter_with_multiple_consumers_emits_once() {
+    let mut vars = HashMap::new();
+    vars.insert("myvar".to_string(), "i64".to_string());
+    let mut g = GraphDescription::new("getter_dedup");
+    g.add_node(begin("be"));
+    // Create a get_myvar node
+    g.add_node(getter_node("g", "myvar"));
+    // Two pure nodes that both read from get_myvar
+    g.add_node(add_node("a", None, None));
+    g.add_node(add_node("b", None, None));
+    g.add_node(assert_eq_int_node("chk", 0));
+    g.add_connection(exec("begin", "be", "chk", "chk_e"));
+    // Connect getter to both pure nodes
+    g.add_connection(data("g", "g_r", "a", "a_a"));
+    g.add_connection(data("g", "g_r", "b", "b_a"));
+    // Connect both pure nodes through chained add to assert
+    g.add_connection(data("a", "a_r", "chk", "chk_a"));
+
+    let programs = compile_graph_to_bytecode_with_variables(&g, vars)
+        .expect("compile with variables");
+    let loadvar_count = programs[0]
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, Instruction::LoadVar { .. }))
+        .count();
+    assert_eq!(
+        loadvar_count, 1,
+        "expected exactly one LoadVar for getter shared by multiple consumers, got {}",
+        loadvar_count
+    );
 }
 
