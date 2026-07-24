@@ -9,7 +9,8 @@ use graphy::{
     Connection, ConnectionType, DataType, GraphDescription, NodeInstance, Pin, PinInstance,
     PinType, Position,
 };
-use pbgc::{compile_graph, compile_graph_to_bytecode, BpProgram, Instruction};
+use std::collections::HashMap;
+use pbgc::{compile_graph, compile_graph_to_bytecode, compile_graph_to_bytecode_with_variables, BpProgram, Instruction};
 
 // ── Native dispatch shims (mirrors what pulsar_macros #[blueprint] generates) ─
 //
