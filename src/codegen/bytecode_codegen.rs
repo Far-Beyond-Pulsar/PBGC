@@ -1,6 +1,6 @@
 use crate::bytecode::comp_ops::{
-    encode_json_blob, encode_name_blob, parse_node_type, CompOpKind, ComponentOpRef,
-    JSON_BLOB_CAPACITY,
+    encode_call_name_blob, encode_json_blob, encode_name_blob, parse_node_type, CompOpKind,
+    ComponentOpRef, JSON_BLOB_CAPACITY,
 };
 use crate::bytecode::{BpProgram, Instruction, LabelId};
 use crate::metadata::BlueprintMetadataProvider;
@@ -443,7 +443,25 @@ impl<'a> BytecodeCodegen<'a> {
                 self.follow_exec_outputs(node)
             }
             CompOpKind::Call => {
-                let name_offset = self.stage_comp_name_blob(class_name, member)?;
+                // The name blob stages the argument count so the runtime
+                // handler knows how many value operands follow.
+                let arg_count = node
+                    .inputs
+                    .iter()
+                    .filter(|p| !matches!(p.pin.data_type, DataType::Exec))
+                    .count();
+                let name_key = format!("{}\0{}\0call", class_name, member);
+                let name_offset = match self.comp_name_blobs.get(&name_key) {
+                    Some(&offset) => offset,
+                    None => {
+                        let bytes =
+                            encode_call_name_blob(class_name, member, arg_count);
+                        let offset = self.layout.alloc(bytes.len(), 1);
+                        self.instructions.push(Instruction::InitBytes { offset, bytes });
+                        self.comp_name_blobs.insert(name_key, offset);
+                        offset
+                    }
+                };
                 let mut input_offsets = vec![name_offset];
                 for pin in node.inputs.iter().filter(|p| !matches!(p.pin.data_type, DataType::Exec)) {
                     input_offsets.push(self.resolve_comp_value_blob(node, pin)?);

@@ -110,6 +110,17 @@ pub fn encode_name_blob(class_name: &str, member: &str) -> Vec<u8> {
     bytes
 }
 
+/// Encode a `comp_call` name blob, staging the argument count as a third
+/// NUL-terminated field so the runtime handler knows how many value
+/// operands follow without any out-of-band length: `{class}\0{method}\
+/// {arg_count}\0`.
+pub fn encode_call_name_blob(class_name: &str, method_name: &str, arg_count: usize) -> Vec<u8> {
+    let mut bytes = encode_name_blob(class_name, method_name);
+    bytes.extend_from_slice(arg_count.to_string().as_bytes());
+    bytes.push(0);
+    bytes
+}
+
 /// Decode a name blob previously written by [`encode_name_blob`].
 ///
 /// `blob` spans exactly the staged region; interior NULs are separators.
