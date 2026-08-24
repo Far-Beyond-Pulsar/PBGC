@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 // Re-export from pulsar_std so that callers only need one import.
 pub use pulsar_std::TypeSlot;
 
+pub mod comp_ops;
+pub use comp_ops::{parse_node_type, CompOpKind, ComponentOpRef};
+
 pub type LabelId = usize;
 
 /// A single bytecode instruction.

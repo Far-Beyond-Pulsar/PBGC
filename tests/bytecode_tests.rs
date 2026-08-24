@@ -656,3 +656,262 @@ fn getter_with_multiple_consumers_emits_once() {
     );
 }
 
+
+// ── Component ops (comp_get_prop / comp_set_prop / comp_call) ────────────────
+
+use pbgc::bytecode::comp_ops::{
+    decode_name_blob, json_blob_len, CompOpKind, ComponentOpRef,
+};
+use pbgc::bytecode::TypeSlot;
+use pbgc::compile_graph_to_bytecode_full;
+use std::cell::RefCell;
+
+fn comp_get_node(id: &str, class: &str, prop: &str) -> NodeInstance {
+    let mut n = NodeInstance::new(
+        id,
+        &format!("comp_get_prop::{class}::{prop}"),
+        Position { x: 100.0, y: 0.0 },
+    );
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_r"),
+        Pin::new(&format!("{id}_r"), "value", DataType::typed("f64"), PinType::Output),
+    ));
+    n
+}
+
+fn comp_set_node(id: &str, class: &str, prop: &str, value: Option<f64>) -> NodeInstance {
+    let mut n = NodeInstance::new(
+        id,
+        &format!("comp_set_prop::{class}::{prop}"),
+        Position { x: 200.0, y: 0.0 },
+    );
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_e"),
+        Pin::new(&format!("{id}_e"), "exec", DataType::Exec, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_v"),
+        Pin::new(&format!("{id}_v"), "value", DataType::typed("f64"), PinType::Input),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_o"),
+        Pin::new(&format!("{id}_o"), "exec", DataType::Exec, PinType::Output),
+    ));
+    if let Some(v) = value {
+        n.properties.insert(format!("{id}_v"), serde_json::json!(v));
+    }
+    n
+}
+
+fn comp_call_node(id: &str, class: &str, method: &str, with_return: bool) -> NodeInstance {
+    let mut n = NodeInstance::new(
+        id,
+        &format!("comp_call::{class}::{method}"),
+        Position { x: 300.0, y: 0.0 },
+    );
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_e"),
+        Pin::new(&format!("{id}_e"), "exec", DataType::Exec, PinType::Input),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_o"),
+        Pin::new(&format!("{id}_o"), "exec", DataType::Exec, PinType::Output),
+    ));
+    if with_return {
+        n.outputs.push(PinInstance::new(
+            &format!("{id}_r"),
+            Pin::new(&format!("{id}_r"), "result", DataType::typed("f64"), PinType::Output),
+        ));
+    }
+    n
+}
+
+#[test]
+fn comp_ops_compile_with_staged_operands_and_component_list() {
+    let mut g = GraphDescription::new("comp_ops");
+    g.add_node(begin("be"));
+    g.add_node(comp_set_node("set", "Light", "intensity", Some(3.5)));
+    g.add_connection(exec("begin", "be", "set", "set_e"));
+
+    let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
+    assert_eq!(
+        compiled.components,
+        vec![ComponentOpRef {
+            kind: CompOpKind::SetProp,
+            class_name: "Light".into(),
+            member: "intensity".into(),
+        }]
+    );
+
+    // Name blob + JSON value blob are staged as InitBytes; the op is a Call
+    // carrying the full node_type so the executor can route on the prefix.
+    let prog = &compiled.programs[0];
+    assert!(prog.instructions.iter().any(|i| matches!(
+        i,
+        Instruction::Call { node_type, input_offsets, has_output: false, .. }
+            if node_type == "comp_set_prop::Light::intensity" && input_offsets.len() == 2
+    )));
+
+    // Serde round trip preserves everything byte-for-byte.
+    let json = serde_json::to_string(prog).unwrap();
+    let back: pbgc::BpProgram = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.instructions.len(), prog.instructions.len());
+}
+
+#[test]
+fn comp_get_feeding_comp_set_compiles_as_blob_chain() {
+    let mut g = GraphDescription::new("comp_chain");
+    g.add_node(begin("be"));
+    g.add_node(comp_get_node("get", "Light", "intensity"));
+    g.add_node(comp_set_node("set", "Light", "intensity", None));
+    g.add_connection(exec("begin", "be", "set", "set_e"));
+    g.add_connection(data("get", "get_r", "set", "set_v"));
+
+    let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
+    assert_eq!(compiled.components.len(), 2);
+    let prog = &compiled.programs[0];
+    // The set's value input resolves to the get's reserved output slot.
+    let get_out = prog.instructions.iter().find_map(|i| match i {
+        Instruction::Call { node_type, output_offset, has_output: true, .. }
+            if node_type == "comp_get_prop::Light::intensity" => Some(*output_offset),
+        _ => None,
+    });
+    let set_in = prog.instructions.iter().find_map(|i| match i {
+        Instruction::Call { node_type, input_offsets, .. }
+            if node_type == "comp_set_prop::Light::intensity" => Some(input_offsets[1]),
+        _ => None,
+    });
+    assert_eq!(get_out, set_in, "get output slot feeds set value input");
+}
+
+#[test]
+fn comp_call_without_return_has_no_output_slot() {
+    let mut g = GraphDescription::new("comp_call_void");
+    g.add_node(begin("be"));
+    g.add_node(comp_call_node("call", "Door", "open", false));
+    g.add_connection(exec("begin", "be", "call", "call_e"));
+
+    let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
+    let has_output = compiled.programs[0].instructions.iter().any(|i| matches!(
+        i,
+        Instruction::Call { node_type, has_output: true, .. }
+            if node_type == "comp_call::Door::open"
+    ));
+    assert!(!has_output, "void call must not reserve an output slot");
+}
+
+// Stub component-op handlers mirroring what the world-connected executor
+// (#647) will do: parse the name blob, decode JSON values, act.
+
+thread_local! {
+    static COMP_OPS_LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Read a `{class}\0{member}\0` name blob staged in the arena: scan past two
+/// NUL terminators and hand back exactly that span.
+unsafe fn arena_name_blob<'a>(mut ptr: *const u8) -> &'a [u8] {
+    let start = ptr;
+    let mut terminators = 0usize;
+    while terminators < 2 {
+        if *ptr == 0 {
+            terminators += 1;
+        }
+        ptr = ptr.add(1);
+    }
+    std::slice::from_raw_parts(start, ptr.offset_from(start) as usize)
+}
+
+unsafe fn log_op(kind: &str, name_ptr: *const u8, value_ptr: Option<*const u8>) {
+    let (class, member) = decode_name_blob(arena_name_blob(name_ptr)).unwrap();
+    let value = value_ptr.map(|p| {
+        let len = json_blob_len(p);
+        let bytes = std::slice::from_raw_parts(p.add(8), len);
+        String::from_utf8_lossy(bytes).into_owned()
+    });
+    COMP_OPS_LOG.with(|log| {
+        log.borrow_mut()
+            .push(format!("{kind}:{class}:{member}:{}", value.unwrap_or_default()))
+    });
+}
+
+unsafe extern "C" fn stub_comp_get(args: *const *const u8, ret: *mut u8, _ts: *const TypeSlot) {
+    log_op("get", *args, None);
+    pbgc::bytecode::comp_ops::write_json_blob(ret, "42.5");
+}
+
+unsafe extern "C" fn stub_comp_set(args: *const *const u8, _ret: *mut u8, _ts: *const TypeSlot) {
+    log_op("set", *args, Some(*args.add(1)));
+}
+
+unsafe extern "C" fn stub_comp_call(args: *const *const u8, ret: *mut u8, _ts: *const TypeSlot) {
+    log_op("call", *args, None);
+    if !ret.is_null() {
+        pbgc::bytecode::comp_ops::write_json_blob(ret, "1.0");
+    }
+}
+
+fn prepare_comp_shims(program: &mut BpProgram) {
+    for instr in &mut program.instructions {
+        if let Instruction::Call { fn_ptr, node_type, .. } = instr {
+            if node_type.starts_with("comp_get_prop::") {
+                *fn_ptr = stub_comp_get as u64;
+            } else if node_type.starts_with("comp_set_prop::") {
+                *fn_ptr = stub_comp_set as u64;
+            } else if node_type.starts_with("comp_call::") {
+                *fn_ptr = stub_comp_call as u64;
+            }
+        }
+    }
+}
+
+#[test]
+fn comp_ops_execute_against_stub_handlers() {
+    COMP_OPS_LOG.with(|log| log.borrow_mut().clear());
+
+    let mut g = GraphDescription::new("comp_exec");
+    g.add_node(begin("be"));
+    g.add_node(comp_set_node("set", "Light", "intensity", Some(7.0)));
+    g.add_node(comp_call_node("call", "Door", "open", true));
+    g.add_connection(exec("begin", "be", "set", "set_e"));
+    g.add_connection(exec("set", "set_o", "call", "call_e"));
+
+    let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
+    for mut prog in compiled.programs {
+        prepare_comp_shims(&mut prog);
+        pbgc::vm::run(&prog).unwrap();
+    }
+
+    let log = COMP_OPS_LOG.with(|log| log.borrow().clone());
+    assert_eq!(log.len(), 2, "both component ops executed");
+    assert_eq!(log[1], "call:Door:open:");
+    assert!(log[0].starts_with("set:Light:intensity:"), "{}", log[0]);
+    // The staged constant survives as JSON; number formatting may differ.
+    let staged: f64 = log[0]["set:Light:intensity:".len()..]
+        .parse()
+        .unwrap_or_else(|_| panic!("staged value is not a JSON number: {}", log[0]));
+    assert!((staged - 7.0).abs() < 1e-6);
+}
+
+#[test]
+fn comp_get_result_flows_into_set_through_arena() {
+    COMP_OPS_LOG.with(|log| log.borrow_mut().clear());
+
+    let mut g = GraphDescription::new("comp_flow");
+    g.add_node(begin("be"));
+    g.add_node(comp_get_node("get", "Light", "intensity"));
+    g.add_node(comp_set_node("set", "Light", "intensity", None));
+    g.add_connection(exec("begin", "be", "set", "set_e"));
+    g.add_connection(data("get", "get_r", "set", "set_v"));
+
+    let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
+    for mut prog in compiled.programs {
+        prepare_comp_shims(&mut prog);
+        pbgc::vm::run(&prog).unwrap();
+    }
+
+    let log = COMP_OPS_LOG.with(|log| log.borrow().clone());
+    assert_eq!(log, vec![
+        "get:Light:intensity:".to_string(),
+        "set:Light:intensity:42.5".to_string(),
+    ]);
+}

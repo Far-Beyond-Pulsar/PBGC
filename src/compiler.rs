@@ -4,6 +4,7 @@
 
 use crate::metadata::{BlueprintMetadataProvider, get_node_metadata};
 use crate::codegen::{BlueprintCodeGenerator, BytecodeCodegen};
+use crate::bytecode::comp_ops::ComponentOpRef;
 use crate::bytecode::BpProgram;
 use graphy::{GraphDescription, GraphyError, DataResolver, ExecutionRouting};
 use std::collections::HashMap;
@@ -171,6 +172,25 @@ pub fn compile_graph_to_bytecode_with_variables(
     graph: &GraphDescription,
     variables: HashMap<String, String>,
 ) -> Result<Vec<BpProgram>, GraphyError> {
+    compile_graph_to_bytecode_full(graph, variables).map(|out| out.programs)
+}
+
+/// A full bytecode compilation: the event programs plus every component
+/// operation they reference (see [`crate::bytecode::comp_ops`]).
+#[derive(Debug, Clone)]
+pub struct BytecodeCompilation {
+    pub programs: Vec<BpProgram>,
+    /// Deduplicated `(kind, class, member)` triples across all programs.
+    pub components: Vec<ComponentOpRef>,
+}
+
+/// Like [`compile_graph_to_bytecode_with_variables`], but also reports the
+/// referenced component operations so runtimes can validate availability and
+/// pre-resolve reflection metadata before executing events.
+pub fn compile_graph_to_bytecode_full(
+    graph: &GraphDescription,
+    variables: HashMap<String, String>,
+) -> Result<BytecodeCompilation, GraphyError> {
     tracing::info!("[PBGC] Starting bytecode compilation");
     tracing::info!("[PBGC] Graph: {} ({} nodes, {} connections)",
         graph.metadata.name, graph.nodes.len(), graph.connections.len());
@@ -187,9 +207,14 @@ pub fn compile_graph_to_bytecode_with_variables(
         variables,
     );
     let programs = codegen.generate_programs()?;
+    let components = codegen.component_refs().to_vec();
 
-    tracing::info!("[PBGC] Bytecode compilation complete ({} programs)", programs.len());
-    Ok(programs)
+    tracing::info!(
+        "[PBGC] Bytecode compilation complete ({} programs, {} component ops)",
+        programs.len(),
+        components.len()
+    );
+    Ok(BytecodeCompilation { programs, components })
 }
 
 #[cfg(test)]

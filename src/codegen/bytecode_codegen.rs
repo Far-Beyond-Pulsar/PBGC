@@ -1,3 +1,7 @@
+use crate::bytecode::comp_ops::{
+    encode_json_blob, encode_name_blob, parse_node_type, CompOpKind, ComponentOpRef,
+    JSON_BLOB_CAPACITY,
+};
 use crate::bytecode::{BpProgram, Instruction, LabelId};
 use crate::metadata::BlueprintMetadataProvider;
 use graphy::core::NodeMetadataProvider;
@@ -144,6 +148,12 @@ pub struct BytecodeCodegen<'a> {
     output_offsets: HashMap<String, OutputSlot>,
     /// canonical key → byte offset of a previously emitted constant
     const_offsets: HashMap<String, usize>,
+    /// `class\0member` → byte offset of the staged component-op name blob.
+    /// Reset per event like [`Self::const_offsets`].
+    comp_name_blobs: HashMap<String, usize>,
+    /// `(class, member)` pairs referenced by component ops across all events,
+    /// deduplicated — surfaced to the runtime alongside the programs.
+    component_refs: Vec<ComponentOpRef>,
     /// variable name → (arena offset, size, align)
     variable_slots: HashMap<String, (usize, usize, usize)>,
 
@@ -180,6 +190,8 @@ impl<'a> BytecodeCodegen<'a> {
             instructions: Vec::new(),
             output_offsets: HashMap::new(),
             const_offsets: HashMap::new(),
+            comp_name_blobs: HashMap::new(),
+            component_refs: Vec::new(),
             variable_slots: HashMap::new(),
             layout: LayoutAllocator::new(),
             next_label: 0,
@@ -230,6 +242,12 @@ impl<'a> BytecodeCodegen<'a> {
         Ok(programs)
     }
 
+    /// Every `(kind, class, member)` component operation referenced by the
+    /// compiled programs, deduplicated in first-appearance order.
+    pub fn component_refs(&self) -> &[ComponentOpRef] {
+        &self.component_refs
+    }
+
     fn preallocate_variable_slots(&mut self) -> Result<(), GraphyError> {
         let mut vars: Vec<(String, String)> = self
             .variables
@@ -250,6 +268,7 @@ impl<'a> BytecodeCodegen<'a> {
         let prev_visited = std::mem::take(&mut self.visited);
         let prev_output_offsets = std::mem::take(&mut self.output_offsets);
         let prev_const_offsets = std::mem::take(&mut self.const_offsets);
+        let prev_comp_blobs = std::mem::take(&mut self.comp_name_blobs);
         let prev_max_args = self.max_args_count;
         self.max_args_count = 0;
 
@@ -286,6 +305,7 @@ impl<'a> BytecodeCodegen<'a> {
         self.visited = prev_visited;
         self.output_offsets = prev_output_offsets;
         self.const_offsets = prev_const_offsets;
+        self.comp_name_blobs = prev_comp_blobs;
         self.max_args_count = prev_max_args;
 
         let mut prog = BpProgram::new(event_name);
@@ -314,6 +334,12 @@ impl<'a> BytecodeCodegen<'a> {
         // Custom event dispatch node — emit a call to `emit_event` native function
         if node.node_type == "emit_custom_event" {
             return self.emit_custom_event_dispatch(node);
+        }
+
+        // Component ops route through their own staged-operand ABI (see
+        // `bytecode::comp_ops`) instead of pulsar_std metadata + dlsym.
+        if let Some(op) = parse_node_type(&node.node_type) {
+            return self.emit_comp_node(node, op);
         }
 
         let meta = self
@@ -371,6 +397,202 @@ impl<'a> BytecodeCodegen<'a> {
             type_slot_offsets: Vec::new(),
         });
         self.follow_exec_outputs(node)
+    }
+
+    // ── Component ops ─────────────────────────────────────────────────────────
+    //
+    // Compiled per the ABI in `bytecode::comp_ops`: a plain `Call` instruction
+    // carrying the full `comp_*::Class::Member` string, with the class/member
+    // name blob staged as `input_offsets[0]` and every value travelling as a
+    // length-prefixed JSON blob. The executor routes on the node_type prefix.
+
+    fn emit_comp_node(
+        &mut self,
+        node: &NodeInstance,
+        (kind, class_name, member): (CompOpKind, &str, &str),
+    ) -> Result<(), GraphyError> {
+        match kind {
+            CompOpKind::GetProp => {
+                self.emit_comp_get_prop(node, class_name, member)?;
+                self.follow_exec_outputs(node)
+            }
+            CompOpKind::SetProp => {
+                let name_offset = self.stage_comp_name_blob(class_name, member)?;
+                let data_pins: Vec<_> = node
+                    .inputs
+                    .iter()
+                    .filter(|p| !matches!(p.pin.data_type, DataType::Exec))
+                    .collect();
+                if data_pins.len() != 1 {
+                    return Err(GraphyError::Custom(format!(
+                        "comp_set_prop node '{}' must have exactly one value input",
+                        node.id
+                    )));
+                }
+                let value_offset = self.resolve_comp_value_blob(node, data_pins[0])?;
+                self.max_args_count = self.max_args_count.max(2);
+                self.instructions.push(Instruction::Call {
+                    fn_ptr: 0,
+                    node_type: node.node_type.clone(),
+                    input_offsets: vec![name_offset, value_offset],
+                    output_offset: 0,
+                    has_output: false,
+                    type_slot_offsets: Vec::new(),
+                });
+                self.record_component_ref(kind, class_name, member);
+                self.follow_exec_outputs(node)
+            }
+            CompOpKind::Call => {
+                let name_offset = self.stage_comp_name_blob(class_name, member)?;
+                let mut input_offsets = vec![name_offset];
+                for pin in node.inputs.iter().filter(|p| !matches!(p.pin.data_type, DataType::Exec)) {
+                    input_offsets.push(self.resolve_comp_value_blob(node, pin)?);
+                }
+                self.max_args_count = self.max_args_count.max(input_offsets.len());
+                let has_output = node
+                    .outputs
+                    .iter()
+                    .any(|p| !matches!(p.pin.data_type, DataType::Exec));
+                let (output_offset, has_output) = if has_output {
+                    (self.alloc_json_blob_slot(), true)
+                } else {
+                    (0, false)
+                };
+                self.instructions.push(Instruction::Call {
+                    fn_ptr: 0,
+                    node_type: node.node_type.clone(),
+                    input_offsets,
+                    output_offset,
+                    has_output,
+                    type_slot_offsets: Vec::new(),
+                });
+                if has_output {
+                    self.output_offsets.insert(node.id.clone(), OutputSlot {
+                        base_offset: output_offset,
+                        field_offsets: HashMap::new(),
+                    });
+                }
+                self.record_component_ref(kind, class_name, member);
+                self.follow_exec_outputs(node)
+            }
+        }
+    }
+
+    /// Emit a pure `comp_get_prop` as an arena producer; returns the offset of
+    /// its reserved output blob.
+    fn emit_comp_get_prop(
+        &mut self,
+        node: &NodeInstance,
+        class_name: &str,
+        member: &str,
+    ) -> Result<usize, GraphyError> {
+        if let Some(slot) = self.output_offsets.get(&node.id) {
+            return Ok(slot.base_offset);
+        }
+        let name_offset = self.stage_comp_name_blob(class_name, member)?;
+        let output_offset = self.alloc_json_blob_slot();
+        self.max_args_count = self.max_args_count.max(1);
+        self.instructions.push(Instruction::Call {
+            fn_ptr: 0,
+            node_type: node.node_type.clone(),
+            input_offsets: vec![name_offset],
+            output_offset,
+            has_output: true,
+            type_slot_offsets: Vec::new(),
+        });
+        self.output_offsets.insert(node.id.clone(), OutputSlot {
+            base_offset: output_offset,
+            field_offsets: HashMap::new(),
+        });
+        self.record_component_ref(CompOpKind::GetProp, class_name, member);
+        Ok(output_offset)
+    }
+
+    /// Stage `{class}\0{member}\0` once per event and return its arena offset.
+    fn stage_comp_name_blob(&mut self, class_name: &str, member: &str) -> Result<usize, GraphyError> {
+        let key = format!("{}\0{}", class_name, member);
+        if let Some(&offset) = self.comp_name_blobs.get(&key) {
+            return Ok(offset);
+        }
+        let bytes = encode_name_blob(class_name, member);
+        let offset = self.layout.alloc(bytes.len(), 1);
+        self.instructions.push(Instruction::InitBytes { offset, bytes });
+        self.comp_name_blobs.insert(key, offset);
+        Ok(offset)
+    }
+
+    /// Resolve one component-op value input to an arena offset holding a
+    /// length-prefixed JSON blob.
+    ///
+    /// Constants stage their exact encoded bytes. Connections are accepted
+    /// only from other component getters (which already produce blob-form
+    /// values); native sources are refused until the world-connected
+    /// executor adds live conversion (#647).
+    fn resolve_comp_value_blob(
+        &mut self,
+        node: &NodeInstance,
+        pin: &graphy::PinInstance,
+    ) -> Result<usize, GraphyError> {
+        use graphy::analysis::DataSource;
+
+        match self.data_resolver.get_input_source(&node.id, &pin.id) {
+            Some(DataSource::Constant(value)) => {
+                let bytes = encode_json_blob(&value.to_string());
+                let offset = self.layout.alloc(bytes.len(), 8);
+                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                Ok(offset)
+            }
+            Some(DataSource::Connection { source_node_id, source_pin }) => {
+                let source_kind = self
+                    .graph
+                    .nodes
+                    .get(source_node_id)
+                    .and_then(|n| parse_node_type(&n.node_type))
+                    .map(|(kind, _, _)| kind);
+                if source_kind == Some(CompOpKind::GetProp) {
+                    self.ensure_connected_output(source_node_id)?;
+                    self.output_offset_for(source_node_id, source_pin).ok_or_else(|| {
+                        GraphyError::Custom(format!(
+                            "No arena offset for output '{}.{}'",
+                            source_node_id, source_pin
+                        ))
+                    })
+                } else {
+                    Err(GraphyError::Custom(format!(
+                        "VM target: component value inputs must be constants or \
+                         component getters (node '{}'); native-source conversion \
+                         arrives with the world-connected executor (#647)",
+                        node.id
+                    )))
+                }
+            }
+            Some(DataSource::Default) => {
+                let bytes = encode_json_blob("null");
+                let offset = self.layout.alloc(bytes.len(), 8);
+                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                Ok(offset)
+            }
+            None => Err(GraphyError::Custom(format!(
+                "No data source for {}.{}",
+                node.id, pin.id
+            ))),
+        }
+    }
+
+    /// Reserve capacity for a runtime-written JSON blob.
+    fn alloc_json_blob_slot(&mut self) -> usize {
+        self.layout.alloc(8 + JSON_BLOB_CAPACITY, 8)
+    }
+
+    fn record_component_ref(&mut self, kind: CompOpKind, class_name: &str, member: &str) {
+        let reference = ComponentOpRef {
+            kind,
+            class_name: class_name.to_string(),
+            member: member.to_string(),
+        };
+        if !self.component_refs.contains(&reference) {
+            self.component_refs.push(reference);
+        }
     }
 
     fn emit_fn_node(
@@ -805,6 +1027,18 @@ impl<'a> BytecodeCodegen<'a> {
                     {
                         let node = node.clone();
                         self.emit_getter(&node)?;
+                        self.in_progress.remove(&node_id);
+                        scheduled.remove(&node_id);
+                        continue;
+                    }
+
+                    // Pure component getters produce arena blobs like any
+                    // other pure producer (ABI: `bytecode::comp_ops`).
+                    if let Some((CompOpKind::GetProp, class_name, member)) =
+                        parse_node_type(&node.node_type)
+                    {
+                        let node = node.clone();
+                        self.emit_comp_get_prop(&node, class_name, member)?;
                         self.in_progress.remove(&node_id);
                         scheduled.remove(&node_id);
                         continue;
