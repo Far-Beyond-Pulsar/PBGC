@@ -3,6 +3,31 @@
 //! Turns a collection of compiled blueprints into blueprint-owned Rust source
 //! files only.  Core project/bootstrap files (`Cargo.toml`, `main.rs`) are
 //! intentionally out of scope and must be handled by the core build system.
+//!
+//! # Pinned-trait contract (#652)
+//!
+//! The emitted `impl Actor` block must match the PINNED `pulsar_scenedb::Actor`
+//! trait exactly (currently: `begin_play`/`end_play`/time-free `tick`, all
+//! `(entity, world)`). SceneDB is pinned by rev from Pulsar-Native's root
+//! manifest, so this vendored copy cannot see API drift at compile time — a
+//! mismatch surfaces only as E0053 inside every generated game project. Two
+//! guards hold that line:
+//!
+//! 1. `pulsar_game`'s build script generates probe actors through THIS module
+//!    and compiles them against the real pinned crate
+//!    (`pulsar_game::blueprint_codegen_drift`); any drift fails
+//!    `cargo test -p pulsar_game`.
+//! 2. `just ci-drift-check` additionally generates a full game project into a
+//!     temp dir and runs `cargo check` on it against current pins.
+//!
+//! ## Updating the vendored copy / the pin
+//!
+//! When pinned SceneDB changes an `Actor` signature: update upstream PBGC,
+//! pull it INTO this vendored copy (`git subtree pull` or re-vendor), adjust
+//! the emission here in the same change, bump the root-manifest rev, then run
+//! both guards above. Never edit only one side — codegen and pins move
+//! together, and the guards exist so forgetting fails CI instead of user
+//! projects.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -420,30 +445,28 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
     };
 
     // ── Struct definition ─────────────────────────────────────────────────────
+    // No per-instance event bus yet: the runtime `EventBus` type does not exist
+    // anywhere in the pinned graph (Pulsar-Native#652 removed the phantom
+    // `gamma_core` reference that used to live here). Custom events currently
+    // compile to empty `__init_events` bodies; reintroduce a bus field only
+    // against a crate that actually ships the type.
     let struct_def = if has_components {
         format!(
             r#"pub struct {ty} {{
     /// Runtime component store — populated lazily in `begin_play`.
     pub components: std::sync::Arc<pulsar_game::ComponentStore>,
-    /// Per-instance event bus for custom blueprint events.
-    pub events: gamma_core::EventBus,
 }}"#
         )
     } else {
-        format!(
-            r#"pub struct {ty} {{
-    /// Per-instance event bus for custom blueprint events.
-    pub events: gamma_core::EventBus,
-}}"#
-        )
+        format!("pub struct {ty} {{}}")
     };
 
     let new_body = if has_components {
         format!(
-            "Self {{ components: std::sync::Arc::new(pulsar_game::ComponentStore::new()), events: gamma_core::EventBus::new() }}"
+            "Self {{ components: std::sync::Arc::new(pulsar_game::ComponentStore::new()) }}"
         )
     } else {
-        "Self { events: gamma_core::EventBus::new() }".to_string()
+        "Self { }".to_string()
     };
 
     // ── Component helper impls ────────────────────────────────────────────────
@@ -550,11 +573,14 @@ impl Actor for {ty} {{
     fn begin_play(&mut self, _entity: Entity, _world: &mut World) {{
 {begin_play_body}    }}
 
-    // Fully-qualify `GameTime`: the `Actor` trait comes from `pulsar_scenedb`
-    // and expects `pulsar_scenedb::GameTime`, whereas the glob-imported prelude
-    // `GameTime` resolves to `pulsar_core`'s structurally-identical-but-distinct
-    // type (they are separate crates). Using the wrong one is an E0053 mismatch.
-    fn tick(&mut self, _entity: Entity, _world: &mut World, _time: pulsar_scenedb::GameTime) {{
+    // Signature MUST match the pinned `pulsar_scenedb::Actor` exactly.
+    // `Actor::tick` is deliberately TIME-FREE there (see that trait's doc):
+    // per-frame timing is the engine's concern and flows through ECS systems
+    // and blueprint dispatch, never through this callback. Do not add
+    // parameters here without changing SceneDB first — a mismatch is E0053 in
+    // every generated project. Guarded by pulsar_game's
+    // `blueprint_codegen_drift` compile probes (Pulsar-Native#652).
+    fn tick(&mut self, _entity: Entity, _world: &mut World) {{
 {tick_body}    }}
 }}
 
@@ -711,7 +737,19 @@ mod tests {
         assert!(actor.contains("pub struct PlayerController"));
         assert!(actor.contains("#[derive(EngineClass, Clone)]"));
         assert!(actor.contains("impl Actor for PlayerController"));
-        assert!(actor.contains("_time: pulsar_scenedb::GameTime"));
+        // #652: the emitted impl must match the pinned `pulsar_scenedb::Actor`
+        // trait exactly — `tick` is time-free there, and no emitted signature
+        // may mention either `GameTime` spelling or any crate that does not
+        // exist in the pinned graph.
+        assert!(
+            actor.contains("fn tick(&mut self, _entity: Entity, _world: &mut World)"),
+            "emitted tick signature drifted from the pinned Actor trait"
+        );
+        assert!(!actor.contains("GameTime"), "Actor::tick must stay time-free");
+        assert!(
+            !actor.contains("gamma_core"),
+            "emitted code may only reference crates present in the pinned graph"
+        );
         assert!(actor.contains("logic::begin_play()"));
         assert!(actor.contains("No tick event in this blueprint"));
     }
