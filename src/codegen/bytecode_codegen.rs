@@ -1,3 +1,7 @@
+use crate::bytecode::comp_ops::{
+    encode_json_blob, encode_targeted_call_name_blob, encode_targeted_name_blob, parse_node_type,
+    CompOpKind, ComponentOpRef, RefTarget, JSON_BLOB_CAPACITY,
+};
 use crate::bytecode::{BpProgram, Instruction, LabelId};
 use crate::metadata::BlueprintMetadataProvider;
 use graphy::core::NodeMetadataProvider;
@@ -144,6 +148,12 @@ pub struct BytecodeCodegen<'a> {
     output_offsets: HashMap<String, OutputSlot>,
     /// canonical key → byte offset of a previously emitted constant
     const_offsets: HashMap<String, usize>,
+    /// `class\0member` → byte offset of the staged component-op name blob.
+    /// Reset per event like [`Self::const_offsets`].
+    comp_name_blobs: HashMap<String, usize>,
+    /// `(class, member)` pairs referenced by component ops across all events,
+    /// deduplicated — surfaced to the runtime alongside the programs.
+    component_refs: Vec<ComponentOpRef>,
     /// variable name → (arena offset, size, align)
     variable_slots: HashMap<String, (usize, usize, usize)>,
 
@@ -180,6 +190,8 @@ impl<'a> BytecodeCodegen<'a> {
             instructions: Vec::new(),
             output_offsets: HashMap::new(),
             const_offsets: HashMap::new(),
+            comp_name_blobs: HashMap::new(),
+            component_refs: Vec::new(),
             variable_slots: HashMap::new(),
             layout: LayoutAllocator::new(),
             next_label: 0,
@@ -230,6 +242,12 @@ impl<'a> BytecodeCodegen<'a> {
         Ok(programs)
     }
 
+    /// Every `(kind, class, member)` component operation referenced by the
+    /// compiled programs, deduplicated in first-appearance order.
+    pub fn component_refs(&self) -> &[ComponentOpRef] {
+        &self.component_refs
+    }
+
     fn preallocate_variable_slots(&mut self) -> Result<(), GraphyError> {
         let mut vars: Vec<(String, String)> = self
             .variables
@@ -250,6 +268,7 @@ impl<'a> BytecodeCodegen<'a> {
         let prev_visited = std::mem::take(&mut self.visited);
         let prev_output_offsets = std::mem::take(&mut self.output_offsets);
         let prev_const_offsets = std::mem::take(&mut self.const_offsets);
+        let prev_comp_blobs = std::mem::take(&mut self.comp_name_blobs);
         let prev_max_args = self.max_args_count;
         self.max_args_count = 0;
 
@@ -286,6 +305,7 @@ impl<'a> BytecodeCodegen<'a> {
         self.visited = prev_visited;
         self.output_offsets = prev_output_offsets;
         self.const_offsets = prev_const_offsets;
+        self.comp_name_blobs = prev_comp_blobs;
         self.max_args_count = prev_max_args;
 
         let mut prog = BpProgram::new(event_name);
@@ -314,6 +334,12 @@ impl<'a> BytecodeCodegen<'a> {
         // Custom event dispatch node — emit a call to `emit_event` native function
         if node.node_type == "emit_custom_event" {
             return self.emit_custom_event_dispatch(node);
+        }
+
+        // Component ops route through their own staged-operand ABI (see
+        // `bytecode::comp_ops`) instead of pulsar_std metadata + dlsym.
+        if let Some(op) = parse_node_type(&node.node_type) {
+            return self.emit_comp_node(node, op);
         }
 
         let meta = self
@@ -371,6 +397,465 @@ impl<'a> BytecodeCodegen<'a> {
             type_slot_offsets: Vec::new(),
         });
         self.follow_exec_outputs(node)
+    }
+
+    // ── Component ops ─────────────────────────────────────────────────────────
+    //
+    // Compiled per the ABI in `bytecode::comp_ops`: a plain `Call` instruction
+    // carrying the full `comp_*::Class::Member` string, with the class/member
+    // name blob staged as `input_offsets[0]` and every value travelling as a
+    // length-prefixed JSON blob. The executor routes on the node_type prefix.
+    //
+    // #654: when a comp op's `component_ref` input pin is CONNECTED, the op
+    // addresses that reference's actor instead of the executing instance —
+    // the name blob gains the trailing `pin` target field and one extra
+    // reference operand is staged between the name blob and the values.
+    // Identity producers (`get_component_ref`, `find_object_by_*`,
+    // `object_ref_literal`) are pure ops in the same routing table.
+
+    fn emit_comp_node(
+        &mut self,
+        node: &NodeInstance,
+        (kind, class_name, member): (CompOpKind, &str, &str),
+    ) -> Result<(), GraphyError> {
+        match kind {
+            CompOpKind::GetProp => {
+                self.emit_comp_get_prop(node, class_name, member)?;
+                self.follow_exec_outputs(node)
+            }
+            CompOpKind::SetProp => self.emit_comp_set_prop(node, class_name, member),
+            CompOpKind::Call => self.emit_comp_call(node, class_name, member),
+            CompOpKind::GetRef => {
+                self.emit_comp_get_ref(node, class_name, member)?;
+                self.follow_exec_outputs(node)
+            }
+            CompOpKind::FindByStableId | CompOpKind::FindByName | CompOpKind::ObjectLiteral => {
+                self.emit_identity_resolver(node)?;
+                self.follow_exec_outputs(node)
+            }
+        }
+    }
+
+    /// Whether this node's `component_ref` input pin is wired to an
+    /// identity producer (or carries a constant reference JSON).
+    fn component_ref_pin_connected(&self, node: &NodeInstance) -> bool {
+        use graphy::analysis::DataSource;
+        matches!(
+            self.data_resolver.get_input_source(&node.id, "component_ref"),
+            Some(DataSource::Connection { .. }) | Some(DataSource::Constant(_))
+        )
+    }
+
+    /// Resolve the staged offset of a node's `component_ref` operand.
+    fn resolve_component_ref_operand(
+        &mut self,
+        node: &NodeInstance,
+    ) -> Result<usize, GraphyError> {
+        let pin = node
+            .inputs
+            .iter()
+            .find(|p| p.id == "component_ref" || p.pin.name == "component")
+            .ok_or_else(|| {
+                GraphyError::Custom(format!(
+                    "pin-targeted component op '{}' has no component_ref pin",
+                    node.id
+                ))
+            })?;
+        self.resolve_comp_value_blob(node, pin)
+    }
+
+    /// Stage the get/set name blob for `target` (#654 ABI): the trailing
+    /// target field is ALWAYS present so the runtime reader can scan a fixed
+    /// field count with no length side-channel.
+    fn stage_targeted_name_blob(
+        &mut self,
+        class_name: &str,
+        member: &str,
+        target: RefTarget,
+    ) -> Result<usize, GraphyError> {
+        let key = format!("{}\0{}\0{}", class_name, member, target.as_field());
+        if let Some(&offset) = self.comp_name_blobs.get(&key) {
+            return Ok(offset);
+        }
+        let bytes = encode_targeted_name_blob(class_name, member, target);
+        let offset = self.layout.alloc(bytes.len(), 1);
+        self.instructions.push(Instruction::InitBytes { offset, bytes });
+        self.comp_name_blobs.insert(key, offset);
+        Ok(offset)
+    }
+
+    fn emit_comp_set_prop(
+        &mut self,
+        node: &NodeInstance,
+        class_name: &str,
+        member: &str,
+    ) -> Result<(), GraphyError> {
+        let targeted = self.component_ref_pin_connected(node);
+        let target = if targeted { RefTarget::RefPin } else { RefTarget::SelfActor };
+        let name_offset = self.stage_targeted_name_blob(class_name, member, target)?;
+        let mut input_offsets = vec![name_offset];
+        if targeted {
+            input_offsets.push(self.resolve_component_ref_operand(node)?);
+        }
+
+        let data_pins: Vec<_> = node
+            .inputs
+            .iter()
+            .filter(|p| !matches!(p.pin.data_type, DataType::Exec))
+            .filter(|p| p.id != "component_ref" && p.pin.name != "component")
+            .collect();
+        if data_pins.len() != 1 {
+            return Err(GraphyError::Custom(format!(
+                "comp_set_prop node '{}' must have exactly one value input",
+                node.id
+            )));
+        }
+        let value_offset = self.resolve_comp_value_blob(node, data_pins[0])?;
+        input_offsets.push(value_offset);
+        self.max_args_count = self.max_args_count.max(input_offsets.len());
+        self.instructions.push(Instruction::Call {
+            fn_ptr: 0,
+            node_type: node.node_type.clone(),
+            input_offsets,
+            output_offset: 0,
+            has_output: false,
+            type_slot_offsets: Vec::new(),
+        });
+        self.record_component_ref(CompOpKind::SetProp, class_name, member);
+        self.follow_exec_outputs(node)
+    }
+
+    fn emit_comp_call(        &mut self,
+        node: &NodeInstance,
+        class_name: &str,
+        member: &str,
+    ) -> Result<(), GraphyError> {
+        // The name blob stages the argument count so the runtime handler
+        // knows how many value operands follow.
+        let arg_count = node
+            .inputs
+            .iter()
+            .filter(|p| !matches!(p.pin.data_type, DataType::Exec))
+            .filter(|p| p.id != "component_ref" && p.pin.name != "component")
+            .count();
+        let targeted = self.component_ref_pin_connected(node);
+        let target = if targeted { RefTarget::RefPin } else { RefTarget::SelfActor };
+        let name_key = format!("{}\0{}\0call\0{}", class_name, member, target.as_field());
+        let name_offset = match self.comp_name_blobs.get(&name_key) {
+            Some(&offset) => offset,
+            None => {
+                let bytes =
+                    encode_targeted_call_name_blob(class_name, member, arg_count, target);
+                let offset = self.layout.alloc(bytes.len(), 1);
+                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                self.comp_name_blobs.insert(name_key, offset);
+                offset
+            }
+        };
+        let mut input_offsets = vec![name_offset];
+        if targeted {
+            input_offsets.push(self.resolve_component_ref_operand(node)?);
+        }
+        for pin in node.inputs.iter()
+            .filter(|p| !matches!(p.pin.data_type, DataType::Exec))
+            .filter(|p| p.id != "component_ref" && p.pin.name != "component")
+        {
+            input_offsets.push(self.resolve_comp_value_blob(node, pin)?);
+        }
+        self.max_args_count = self.max_args_count.max(input_offsets.len());
+        let has_output = node
+            .outputs
+            .iter()
+            .any(|p| !matches!(p.pin.data_type, DataType::Exec));
+        let (output_offset, has_output) = if has_output {
+            (self.alloc_json_blob_slot(), true)
+        } else {
+            (0, false)
+        };
+        self.instructions.push(Instruction::Call {
+            fn_ptr: 0,
+            node_type: node.node_type.clone(),
+            input_offsets,
+            output_offset,
+            has_output,
+            type_slot_offsets: Vec::new(),
+        });
+        if has_output {
+            self.output_offsets.insert(node.id.clone(), OutputSlot {
+                base_offset: output_offset,
+                field_offsets: HashMap::new(),
+            });
+        }
+        self.record_component_ref(CompOpKind::Call, class_name, member);
+        self.follow_exec_outputs(node)
+    }
+
+    /// Emit a pure `comp_get_prop` as an arena producer; returns the offset of
+    /// its reserved output blob.
+    fn emit_comp_get_prop(
+        &mut self,
+        node: &NodeInstance,
+        class_name: &str,
+        member: &str,
+    ) -> Result<usize, GraphyError> {
+        if let Some(slot) = self.output_offsets.get(&node.id) {
+            return Ok(slot.base_offset);
+        }
+        let targeted = self.component_ref_pin_connected(node);
+        let target = if targeted { RefTarget::RefPin } else { RefTarget::SelfActor };
+        let name_offset = self.stage_targeted_name_blob(class_name, member, target)?;
+        let mut input_offsets = vec![name_offset];
+        if targeted {
+            input_offsets.push(self.resolve_component_ref_operand(node)?);
+        }
+        let output_offset = self.alloc_json_blob_slot();
+        self.max_args_count = self.max_args_count.max(input_offsets.len());
+        self.instructions.push(Instruction::Call {
+            fn_ptr: 0,
+            node_type: node.node_type.clone(),
+            input_offsets,
+            output_offset,
+            has_output: true,
+            type_slot_offsets: Vec::new(),
+        });
+        self.output_offsets.insert(node.id.clone(), OutputSlot {
+            base_offset: output_offset,
+            field_offsets: HashMap::new(),
+        });
+        self.record_component_ref(CompOpKind::GetProp, class_name, member);
+        Ok(output_offset)
+    }
+
+    /// Emit a pure `get_component_ref::{Class}::{Index}` producer (#654):
+    /// outputs the referenced component as its #642 JSON shape, resolving
+    /// entity bits at runtime. An optional `actor` input pin redirects the
+    /// lookup to another object (fed by `find_object_by_*` or another ref
+    /// producer); unconnected means the executing instance itself.
+    fn emit_comp_get_ref(
+        &mut self,
+        node: &NodeInstance,
+        class_name: &str,
+        member: &str,
+    ) -> Result<usize, GraphyError> {
+        if let Some(slot) = self.output_offsets.get(&node.id) {
+            return Ok(slot.base_offset);
+        }
+        let actor_pin = node.inputs.iter().find(|p| p.id == "actor");
+        let target = if actor_pin.is_some() { RefTarget::RefPin } else { RefTarget::SelfActor };
+        let name_key = format!("ref\0{class_name}\0{member}\0{}", target.as_field());
+        let name_offset = match self.comp_name_blobs.get(&name_key) {
+            Some(&offset) => offset,
+            None => {
+                let bytes = encode_targeted_name_blob(class_name, member, target);
+                let offset = self.layout.alloc(bytes.len(), 1);
+                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                self.comp_name_blobs.insert(name_key, offset);
+                offset
+            }
+        };
+        let mut input_offsets = vec![name_offset];
+        if let Some(pin) = actor_pin {
+            input_offsets.push(self.resolve_comp_value_blob(node, pin)?);
+        }
+        let output_offset = self.alloc_json_blob_slot();
+        self.max_args_count = self.max_args_count.max(input_offsets.len());
+        self.instructions.push(Instruction::Call {
+            fn_ptr: 0,
+            node_type: node.node_type.clone(),
+            input_offsets,
+            output_offset,
+            has_output: true,
+            type_slot_offsets: Vec::new(),
+        });
+        self.output_offsets.insert(node.id.clone(), OutputSlot {
+            base_offset: output_offset,
+            field_offsets: HashMap::new(),
+        });
+        self.record_component_ref(CompOpKind::GetRef, class_name, member);
+        Ok(output_offset)
+    }
+
+    /// Emit an identity resolver (`find_object_by_stable_id` /
+    /// `find_object_by_name` / `object_ref_literal`) — one staged JSON
+    /// operand in, a resolved reference blob out (#654). All resolution is
+    /// deferred to runtime against the live world, so references survive
+    /// save/load cycles.
+    fn emit_identity_resolver(&mut self, node: &NodeInstance) -> Result<usize, GraphyError> {
+        if let Some(slot) = self.output_offsets.get(&node.id) {
+            return Ok(slot.base_offset);
+        }
+        let needle = node
+            .inputs
+            .iter()
+            .find(|p| !matches!(p.pin.data_type, DataType::Exec))
+            .ok_or_else(|| {
+                GraphyError::Custom(format!(
+                    "identity resolver node '{}' has no operand input",
+                    node.id
+                ))
+            })?;
+        let operand_offset = self.resolve_identity_operand(node, needle)?;
+        let output_offset = self.alloc_json_blob_slot();
+        self.max_args_count = self.max_args_count.max(1);
+        self.instructions.push(Instruction::Call {
+            fn_ptr: 0,
+            node_type: node.node_type.clone(),
+            input_offsets: vec![operand_offset],
+            output_offset,
+            has_output: true,
+            type_slot_offsets: Vec::new(),
+        });
+        self.output_offsets.insert(node.id.clone(), OutputSlot {
+            base_offset: output_offset,
+            field_offsets: HashMap::new(),
+        });
+        Ok(output_offset)
+    }
+
+    /// Resolve an identity resolver's operand. For `object_ref_literal` the
+    /// serialized reference comes from the node's properties (authored by
+    /// the picker/drag flow); resolvers take their needle like any value
+    /// input (constant or connection).
+    fn resolve_identity_operand(
+        &mut self,
+        node: &NodeInstance,
+        pin: &graphy::PinInstance,
+    ) -> Result<usize, GraphyError> {
+        use graphy::analysis::DataSource;
+
+        if parse_node_type(&node.node_type).map(|(k, _, _)| k) == Some(CompOpKind::ObjectLiteral) {
+            let stable_id = node
+                .properties
+                .get("stable_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    GraphyError::Custom(format!(
+                        "object_ref_literal node '{}' has no stable_id property",
+                        node.id
+                    ))
+                })?;
+            let class_name = node
+                .properties
+                .get("class_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let component_index = node
+                .properties
+                .get("component_index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let literal = serde_json::json!({
+                "stable_id": stable_id,
+                "class_name": class_name,
+                "component_index": component_index,
+            });
+            let bytes = encode_json_blob(&literal.to_string());
+            let offset = self.layout.alloc(bytes.len(), 8);
+            self.instructions.push(Instruction::InitBytes { offset, bytes });
+            return Ok(offset);
+        }
+
+        match self.data_resolver.get_input_source(&node.id, &pin.id) {
+            Some(DataSource::Constant(value)) => {
+                let bytes = encode_json_blob(&value.to_string());
+                let offset = self.layout.alloc(bytes.len(), 8);
+                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                Ok(offset)
+            }
+            Some(DataSource::Connection { source_node_id, source_pin }) => {
+                self.ensure_connected_output(source_node_id)?;
+                self.output_offset_for(source_node_id, source_pin).ok_or_else(|| {
+                    GraphyError::Custom(format!(
+                        "No arena offset for output '{}.{}'",
+                        source_node_id, source_pin
+                    ))
+                })
+            }
+            Some(DataSource::Default) => {
+                let bytes = encode_json_blob("\"\"");
+                let offset = self.layout.alloc(bytes.len(), 8);
+                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                Ok(offset)
+            }
+            None => Err(GraphyError::Custom(format!(
+                "No data source for {}.{}",
+                node.id, pin.id
+            ))),
+        }
+    }
+
+    /// Resolve one component-op value input to an arena offset holding a
+    /// length-prefixed JSON blob.
+    ///
+    /// Constants stage their exact encoded bytes. Connections are accepted
+    /// from the graph's blob producers — component getters AND (#654) the
+    /// identity resolvers (`get_component_ref`, `find_object_by_*`,
+    /// `object_ref_literal`), which all emit runtime-written JSON blobs;
+    /// native sources are refused until a live conversion exists for them.
+    fn resolve_comp_value_blob(
+        &mut self,
+        node: &NodeInstance,
+        pin: &graphy::PinInstance,
+    ) -> Result<usize, GraphyError> {
+        use graphy::analysis::DataSource;
+
+        match self.data_resolver.get_input_source(&node.id, &pin.id) {
+            Some(DataSource::Constant(value)) => {
+                let bytes = encode_json_blob(&value.to_string());
+                let offset = self.layout.alloc(bytes.len(), 8);
+                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                Ok(offset)
+            }
+            Some(DataSource::Connection { source_node_id, source_pin }) => {
+                let accepts = self
+                    .graph
+                    .nodes
+                    .get(source_node_id)
+                    .and_then(|n| parse_node_type(&n.node_type))
+                    .map(|(kind, _, _)| kind == CompOpKind::GetProp || is_identity_producer(kind))
+                    .unwrap_or(false);
+                if !accepts {
+                    return Err(GraphyError::Custom(format!(
+                        "VM target: component value inputs must be constants, component \
+                         getters, or identity references (node '{}')",
+                        node.id
+                    )));
+                }
+                self.ensure_connected_output(source_node_id)?;
+                self.output_offset_for(source_node_id, source_pin).ok_or_else(|| {
+                    GraphyError::Custom(format!(
+                        "No arena offset for output '{}.{}'",
+                        source_node_id, source_pin
+                    ))
+                })
+            }
+            Some(DataSource::Default) => {
+                let bytes = encode_json_blob("null");
+                let offset = self.layout.alloc(bytes.len(), 8);
+                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                Ok(offset)
+            }
+            None => Err(GraphyError::Custom(format!(
+                "No data source for {}.{}",
+                node.id, pin.id
+            ))),
+        }
+    }
+
+    /// Reserve capacity for a runtime-written JSON blob.
+    fn alloc_json_blob_slot(&mut self) -> usize {
+        self.layout.alloc(8 + JSON_BLOB_CAPACITY, 8)
+    }
+
+    fn record_component_ref(&mut self, kind: CompOpKind, class_name: &str, member: &str) {
+        let reference = ComponentOpRef {
+            kind,
+            class_name: class_name.to_string(),
+            member: member.to_string(),
+        };
+        if !self.component_refs.contains(&reference) {
+            self.component_refs.push(reference);
+        }
     }
 
     fn emit_fn_node(
@@ -810,6 +1295,37 @@ impl<'a> BytecodeCodegen<'a> {
                         continue;
                     }
 
+                    // Pure component getters produce arena blobs like any
+                    // other pure producer (ABI: `bytecode::comp_ops`).
+                    if let Some((CompOpKind::GetProp, class_name, member)) =
+                        parse_node_type(&node.node_type)
+                    {
+                        let node = node.clone();
+                        self.emit_comp_get_prop(&node, class_name, member)?;
+                        self.in_progress.remove(&node_id);
+                        scheduled.remove(&node_id);
+                        continue;
+                    }
+
+                    // Identity producers (#654) likewise produce arena
+                    // reference blobs from pure node kinds.
+                    if let Some((kind, class_name, member)) = parse_node_type(&node.node_type) {
+                        if is_identity_producer(kind) {
+                            let node = node.clone();
+                            match kind {
+                                CompOpKind::GetRef => {
+                                    self.emit_comp_get_ref(&node, class_name, member)?;
+                                }
+                                _ => {
+                                    self.emit_identity_resolver(&node)?;
+                                }
+                            }
+                            self.in_progress.remove(&node_id);
+                            scheduled.remove(&node_id);
+                            continue;
+                        }
+                    }
+
                     let meta = self
                         .metadata_provider
                         .get_node_metadata(&node.node_type)
@@ -1030,8 +1546,17 @@ impl<'a> BytecodeCodegen<'a> {
     }
 }
 
-fn variable_layout_for_type(type_str: &str) -> Option<(usize, usize)> {
-    match type_str.trim() {
+/// Whether `kind` is one of the #654 identity producers whose output is a
+/// runtime-written reference blob (`get_component_ref`, the find resolvers,
+/// and `object_ref_literal`).
+fn is_identity_producer(kind: CompOpKind) -> bool {
+    matches!(
+        kind,
+        CompOpKind::GetRef | CompOpKind::FindByStableId | CompOpKind::FindByName | CompOpKind::ObjectLiteral
+    )
+}
+
+fn variable_layout_for_type(type_str: &str) -> Option<(usize, usize)> {    match type_str.trim() {
         "bool" | "i8" | "u8" => Some((1, 1)),
         "i16" | "u16" => Some((2, 2)),
         "i32" | "u32" | "f32" | "char" => Some((4, 4)),

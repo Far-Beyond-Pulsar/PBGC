@@ -12,11 +12,14 @@ pub use compiler::{
     compile_graph_with_library_manager,
     compile_graph_with_variables,
     compile_graph_to_bytecode,
+    compile_graph_to_bytecode_full,
     compile_graph_to_bytecode_with_variables,
+    BytecodeCompilation,
 };
 
 // Bytecode types
 pub use bytecode::{BpProgram, Instruction, LabelId};
+pub use bytecode::comp_ops::{parse_node_type, CompOpKind, ComponentOpRef};
 
 // VM execution APIs
 pub use vm::{run, run_with_external_arena, DispatchFn, VmError};
