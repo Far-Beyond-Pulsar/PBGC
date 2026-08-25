@@ -672,6 +672,12 @@ fn comp_get_node(id: &str, class: &str, prop: &str) -> NodeInstance {
         &format!("comp_get_prop::{class}::{prop}"),
         Position { x: 100.0, y: 0.0 },
     );
+    // Editor comp_* nodes always carry the (optional) component_ref target
+    // pin (#654); unconnected means self-targeted.
+    n.inputs.push(PinInstance::new(
+        "component_ref",
+        Pin::new("component_ref", "component", DataType::typed("ComponentRef"), PinType::Input),
+    ));
     n.outputs.push(PinInstance::new(
         &format!("{id}_r"),
         Pin::new(&format!("{id}_r"), "value", DataType::typed("f64"), PinType::Output),
@@ -688,6 +694,10 @@ fn comp_set_node(id: &str, class: &str, prop: &str, value: Option<f64>) -> NodeI
     n.inputs.push(PinInstance::new(
         &format!("{id}_e"),
         Pin::new(&format!("{id}_e"), "exec", DataType::Exec, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        "component_ref",
+        Pin::new("component_ref", "component", DataType::typed("ComponentRef"), PinType::Input),
     ));
     n.inputs.push(PinInstance::new(
         &format!("{id}_v"),
@@ -712,6 +722,10 @@ fn comp_call_node(id: &str, class: &str, method: &str, with_return: bool) -> Nod
     n.inputs.push(PinInstance::new(
         &format!("{id}_e"),
         Pin::new(&format!("{id}_e"), "exec", DataType::Exec, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        "component_ref",
+        Pin::new("component_ref", "component", DataType::typed("ComponentRef"), PinType::Input),
     ));
     n.outputs.push(PinInstance::new(
         &format!("{id}_o"),
@@ -956,7 +970,9 @@ fn rust_emission_routes_comp_ops_through_the_live_dispatcher() {
     );
     assert!(
         actor.contains("json_args_to_method_args(\"Door\", \"open\"")
-            && actor.contains("invoke_component_method(_world, _entity, \"Door\", 0, \"open\", __args)"),
+            && actor.contains(
+                "invoke_component_method(_world, __bp_target_entity, \"Door\", __bp_target_index, \"open\", __args)"
+            ),
         "comp_call must dispatch through the shared JSON->typed conversion:\n{actor}"
     );
     // Generated event functions receive the live world from the Actor impl.
@@ -973,4 +989,286 @@ fn rust_emission_routes_comp_ops_through_the_live_dispatcher() {
     assert!(!actor.contains("__bp_clear_comp_ctx"));
     assert!(!actor.contains("ComponentStore"));
     assert!(!actor.contains("gamma_core"));
+}
+
+// ── Identity references (#654) ────────────────────────────────────────────────
+
+use pbgc::bytecode::comp_ops::{decode_targeted_call_name_blob, decode_targeted_name_blob};
+
+/// A `get_component_ref::Class::N` node: ComponentRef-typed output, optional
+/// `actor` redirect input.
+fn get_ref_node(id: &str, class: &str, index: u32, with_actor_pin: bool) -> NodeInstance {
+    let mut n = NodeInstance::new(
+        id,
+        &format!("get_component_ref::{class}::{index}"),
+        Position { x: 50.0, y: 0.0 },
+    );
+    if with_actor_pin {
+        n.inputs.push(PinInstance::new(
+            "actor",
+            Pin::new("actor", "actor", DataType::typed("ActorRef"), PinType::Input),
+        ));
+    }
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_r"),
+        Pin::new(&format!("{id}_r"), "component", DataType::typed("ComponentRef"), PinType::Output),
+    ));
+    n
+}
+
+/// A `find_object_by_name` resolver node: String needle in, ActorRef out.
+fn find_node(id: &str, needle: &str) -> NodeInstance {
+    let mut n = NodeInstance::new(id, "find_object_by_name", Position { x: 25.0, y: 0.0 });
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_n"),
+        Pin::new(&format!("{id}_n"), "name", DataType::typed("String"), PinType::Input),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_r"),
+        Pin::new(&format!("{id}_r"), "actor", DataType::typed("ActorRef"), PinType::Output),
+    ));
+    n.properties.insert(format!("{id}_n"), serde_json::json!(needle));
+    n
+}
+
+/// #654: a comp_set_prop with a CONNECTED component_ref pin stages the
+/// targeted name blob plus the reference operand between name and value.
+#[test]
+fn pin_targeted_comp_set_stages_reference_operand() {
+    let mut g = GraphDescription::new("pin_targeted");
+    g.add_node(begin("be"));
+    g.add_node(get_ref_node("ref", "Light", 0, false));
+    g.add_node(comp_set_node("set", "Light", "intensity", Some(3.0)));
+    g.add_connection(data("ref", "ref_r", "set", "component_ref"));
+    g.add_connection(exec("begin", "be", "set", "set_e"));
+
+    let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
+    let prog = &compiled.programs[0];
+    let call = prog.instructions.iter().find_map(|i| match i {
+        Instruction::Call { node_type, input_offsets, .. }
+            if node_type == "comp_set_prop::Light::intensity" =>
+        {
+            Some(input_offsets.clone())
+        }
+        _ => None,
+    });
+    let input_offsets = call.expect("pin-targeted set must compile to a Call");
+    // name + reference operand + value operand.
+    assert_eq!(input_offsets.len(), 3);
+
+    // The staged name blob carries the trailing `pin` target field.
+    let blob = prog.instructions.iter().find_map(|i| match i {
+        Instruction::InitBytes { offset, bytes } if *offset == input_offsets[0] => {
+            Some(bytes.clone())
+        }
+        _ => None,
+    });
+    let fields =
+        decode_targeted_name_blob(&blob.expect("name blob staged")).expect("decodes");
+    assert_eq!(fields.target, pbgc::bytecode::comp_ops::RefTarget::RefPin);
+    assert_eq!(
+        compiled.components,
+        vec![
+            ComponentOpRef { kind: CompOpKind::GetRef, class_name: "Light".into(), member: "0".into() },
+            ComponentOpRef {
+                kind: CompOpKind::SetProp,
+                class_name: "Light".into(),
+                member: "intensity".into()
+            },
+        ]
+    );
+}
+
+/// #654: find_object_by_name feeding get_component_ref's actor pin, feeding
+/// a comp_get_prop's component_ref pin — the whole cross-object chain
+/// compiles as pure blob producers with runtime resolution.
+#[test]
+fn cross_object_chain_compiles_as_identity_producers() {
+    let mut g = GraphDescription::new("cross_object");
+    g.add_node(begin("be"));
+    g.add_node(find_node("find", "door_light"));
+    g.add_node(get_ref_node("ref", "Light", 2, true));
+    g.add_node(comp_get_node("get", "Light", "intensity"));
+    g.add_connection(data("find", "find_r", "ref", "actor"));
+    g.add_connection(data("ref", "ref_r", "get", "component_ref"));
+    g.add_node(comp_set_node("set", "Light", "intensity", None));
+    g.add_connection(exec("begin", "be", "set", "set_e"));
+    g.add_connection(data("get", "get_r", "set", "set_v"));
+
+    let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
+    let prog = &compiled.programs[0];
+
+    // All three identity/value producers emitted Calls with outputs.
+    for node_type in [
+        "find_object_by_name",
+        "get_component_ref::Light::2",
+        "comp_get_prop::Light::intensity",
+        "comp_set_prop::Light::intensity",
+    ] {
+        assert!(
+            prog.instructions.iter().any(|i| matches!(
+                i,
+                Instruction::Call { node_type: nt, .. } if nt == node_type
+            )),
+            "missing Call for {node_type}"
+        );
+    }
+
+    // The get op is pin-targeted (ref wired into its component_ref pin):
+    // name + reference operand.
+    let get_inputs = prog.instructions.iter().find_map(|i| match i {
+        Instruction::Call { node_type, input_offsets, .. }
+            if node_type == "comp_get_prop::Light::intensity" =>
+        {
+            Some(input_offsets.len())
+        }
+        _ => None,
+    });
+    assert_eq!(get_inputs, Some(2));
+    // The set stays self-targeted (its own component_ref pin unconnected):
+    // legacy name + value shape.
+    let set_inputs = prog.instructions.iter().find_map(|i| match i {
+        Instruction::Call { node_type, input_offsets, .. }
+            if node_type == "comp_set_prop::Light::intensity" =>
+        {
+            Some(input_offsets.len())
+        }
+        _ => None,
+    });
+    assert_eq!(set_inputs, Some(2));
+}
+
+/// #654: the Rust emission routes cross-object graphs through
+/// `pulsar_game::script_refs` — the SAME helpers the VM trampolines call —
+/// with the dispatcher still doing the property access.
+#[test]
+fn rust_emission_routes_references_through_script_refs() {
+    let mut g = GraphDescription::new("rust_refs");
+    g.add_node(begin("be"));
+    g.add_node(find_node("find", "door_light"));
+    g.add_node(get_ref_node("ref", "Light", 0, true));
+    g.add_connection(data("find", "find_r", "ref", "actor"));
+    g.add_node(comp_set_node("set", "Light", "color", None));
+    g.add_connection(data("ref", "ref_r", "set", "component_ref"));
+    g.add_connection(exec("begin", "be", "set", "set_e"));
+    g.add_node(comp_get_node("get", "Light", "color"));
+    g.add_connection(data("ref", "ref_r", "get", "component_ref"));
+
+    let logic = pbgc::compile_graph(&g).expect("rust compilation");
+    assert!(
+        logic.contains("pulsar_game::script_refs::find_object_by_name("),
+        "resolver nodes must resolve through script_refs:\n{logic}"
+    );
+    assert!(
+        logic.contains("pulsar_game::script_refs::component_ref_json(")
+            && logic.contains("\"Light\",\n                0,"),
+        "get_component_ref must build its ref through script_refs:\n{logic}"
+    );
+    assert!(
+        logic.contains("pulsar_game::script_refs::resolve_pin_target("),
+        "pin-targeted ops must resolve their target through script_refs:\n{logic}"
+    );
+    assert!(
+        logic.contains("__bp_target_index,"),
+        "pin-targeted ops must carry the reference's component_index:\n{logic}"
+    );
+
+    // An object literal emits its save/load form for runtime resolution —
+    // never baked entity bits (#639). It only materializes when consumed,
+    // so wire it into a set op's component_ref pin.
+    let mut lit = GraphDescription::new("rust_literal");
+    lit.add_node(begin("be"));
+    let mut literal = NodeInstance::new("lit", "object_ref_literal", Position { x: 10.0, y: 0.0 });
+    literal.outputs.push(PinInstance::new(
+        "lit_r",
+        Pin::new("lit_r", "component", DataType::typed("ComponentRef"), PinType::Output),
+    ));
+    literal
+        .properties
+        .insert("stable_id".to_string(), serde_json::json!("door"));
+    literal
+        .properties
+        .insert("class_name".to_string(), serde_json::json!("Light"));
+    literal
+        .properties
+        .insert("component_index".to_string(), serde_json::json!(1));
+    lit.add_node(literal);
+    lit.add_node(comp_set_node("set", "Light", "color", Some(9.0)));
+    lit.add_connection(data("lit", "lit_r", "set", "component_ref"));
+    lit.add_connection(exec("begin", "be", "set", "set_e"));
+    let lit_logic = pbgc::compile_graph(&lit).expect("literal compilation");
+    assert!(
+        lit_logic.contains("pulsar_game::script_refs::object_literal_json(")
+            && lit_logic.contains("\"door\",")
+            && lit_logic.contains("\"Light\","),
+        "literals must emit their serialized form:\n{lit_logic}"
+    );
+    assert!(
+        lit_logic.contains("resolve_pin_target("),
+        "the consuming set must resolve through the literal:\n{lit_logic}"
+    );
+}
+
+/// #654: self-targeted ops carry the EXPLICIT `self` target field (ABI v2) —
+/// the runtime reader scans a fixed field count, so no legacy shapes exist in
+/// fresh compilations.
+#[test]
+fn unconnected_pins_carry_explicit_self_target() {
+    let mut g = GraphDescription::new("self_shape");
+    g.add_node(begin("be"));
+    g.add_node(comp_set_node("set", "Light", "intensity", Some(1.0)));
+    g.add_connection(exec("begin", "be", "set", "set_e"));
+
+    let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
+    let prog = &compiled.programs[0];
+    let inputs = prog.instructions.iter().find_map(|i| match i {
+        Instruction::Call { node_type, input_offsets, .. }
+            if node_type == "comp_set_prop::Light::intensity" =>
+        {
+            Some(input_offsets.clone())
+        }
+        _ => None,
+    })
+    .expect("set compiles");
+    assert_eq!(inputs.len(), 2, "self-targeted: name + value only");
+    let blob = prog.instructions.iter().find_map(|i| match i {
+        Instruction::InitBytes { offset, bytes } if *offset == inputs[0] => Some(bytes.clone()),
+        _ => None,
+    });
+    let fields = decode_targeted_name_blob(blob.as_deref().unwrap()).expect("decodes");
+    assert_eq!(fields.target, pbgc::bytecode::comp_ops::RefTarget::SelfActor);
+    // The staged bytes really do end with the `self` field.
+    let blob = blob.unwrap();
+    assert!(blob.ends_with(b"self\0"));
+}
+
+/// #654: a comp_call can be pin-targeted; its name blob then carries argc
+/// AND the target field, with the reference operand first among values.
+#[test]
+fn pin_targeted_call_stages_argc_and_target() {
+    let mut g = GraphDescription::new("call_targeted");
+    g.add_node(begin("be"));
+    g.add_node(get_ref_node("ref", "Door", 0, false));
+    g.add_node(comp_call_node("call", "Door", "open", true));
+    g.add_connection(data("ref", "ref_r", "call", "component_ref"));
+    g.add_connection(exec("begin", "be", "call", "call_e"));
+
+    let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
+    let prog = &compiled.programs[0];
+    let inputs = prog.instructions.iter().find_map(|i| match i {
+        Instruction::Call { node_type, input_offsets, .. } if node_type == "comp_call::Door::open" => {
+            Some(input_offsets.clone())
+        }
+        _ => None,
+    })
+    .expect("call compiles");
+    // name + reference operand (no method args on this node).
+    assert_eq!(inputs.len(), 2);
+    let blob = prog.instructions.iter().find_map(|i| match i {
+        Instruction::InitBytes { offset, bytes } if *offset == inputs[0] => Some(bytes.clone()),
+        _ => None,
+    });
+    let fields = decode_targeted_call_name_blob(&blob.unwrap()).expect("decodes");
+    assert_eq!(fields.arg_count, 0);
+    assert_eq!(fields.target, pbgc::bytecode::comp_ops::RefTarget::RefPin);
 }

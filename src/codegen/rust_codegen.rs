@@ -439,7 +439,12 @@ impl<'a> BlueprintCodeGenerator<'a> {
 
     /// Generate a component property getter expression (pure, inline).
     ///
-    /// Node type format: `comp_get_prop::{ClassName}::{PropName}`
+    /// Node type format: `comp_get_prop::{ClassName}::{PropName}`.
+    ///
+    /// #654: when the node's `component_ref` input pin is wired to an
+    /// identity producer, the read targets THAT reference's actor/instance;
+    /// unconnected pins keep addressing the executing instance itself
+    /// (index 0).
     fn generate_comp_get_prop_expr(&self, node: &NodeInstance) -> Result<String, GraphyError> {
         let rest = node
             .node_type
@@ -453,19 +458,150 @@ impl<'a> BlueprintCodeGenerator<'a> {
             .next()
             .ok_or_else(|| GraphyError::Custom("Missing prop name in comp_get_prop".into()))?;
 
+        let target = self.generate_pin_target_expr(node, class_name)?;
         Ok(format!(
-            r#"pulsar_world_registry::dispatch::get_component_property(
-                _world,
-                _entity,
-                "{class_name}",
-                0,
-                "{prop_name}",
-            )
-            .unwrap_or(serde_json::Value::Null)"#
+            r#"match {target} {{
+                Some((__bp_target_entity, __bp_target_index)) => pulsar_world_registry::dispatch::get_component_property(
+                    _world,
+                    __bp_target_entity,
+                    "{class_name}",
+                    __bp_target_index,
+                    "{prop_name}",
+                )
+                .unwrap_or(serde_json::Value::Null),
+                None => serde_json::Value::Null,
+            }}"#
         ))
     }
 
+    /// Generate the target-resolution expression for a component op's
+    /// optional `component_ref` input (#654).
+    ///
+    /// Unconnected pin → constant `(self entity, index 0)` pair shaped like
+    /// the resolved form so every op site shares one code path. Connected →
+    /// `resolve_pin_target(..)` against the wired reference, which logs its
+    /// typed failure and yields `None` on stale/lost targets (#641
+    /// degrade-to-null semantics, no panics).
+    fn generate_pin_target_expr(
+        &self,
+        node: &NodeInstance,
+        class_name: &str,
+    ) -> Result<String, GraphyError> {
+        use graphy::analysis::DataSource;
+
+        match self.data_resolver.get_input_source(&node.id, "component_ref") {
+            Some(DataSource::Connection { source_node_id, .. }) => {
+                let ref_expr =
+                    self.identity_producer_expr(&source_node_id)?;
+                Ok(format!(
+                    "pulsar_game::script_refs::resolve_pin_target(\n\
+                     \x20               _world,\n\
+                     \x20               &({ref_expr}),\n\
+                     \x20               \"{class_name}\",\n\
+                     \x20               \"{}\",\n\
+                     \x20           )",
+                    node.node_type
+                ))
+            }
+            _ => Ok("Some((_entity, 0))".to_string()),
+        }
+    }
+
+    /// Generate the producing expression for an identity-reference node
+    /// (`get_component_ref`, `find_object_by_*`, `object_ref_literal`),
+    /// shared by pure-input inlining and component_ref pin resolution (#654).
+    fn identity_producer_expr(&self, source_node_id: &str) -> Result<String, GraphyError> {
+        let node = self.graph.nodes.get(source_node_id).ok_or_else(|| {
+            GraphyError::NodeNotFound(source_node_id.to_string())
+        })?;
+
+        if let Some(rest) = node.node_type.strip_prefix("get_component_ref::") {
+            let mut parts = rest.splitn(2, "::");
+            let class_name = parts.next().unwrap_or_default();
+            let index: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            // Optional actor redirect: another object's actor ref.
+            let actor_expr = match node.inputs.iter().find(|p| p.id == "actor") {
+                Some(pin) => self.generate_input_expression(&node.id, &pin.id)?,
+                None => "_entity".to_string(),
+            };
+            return Ok(format!(
+                "pulsar_game::script_refs::component_ref_json(\n\
+                 \x20               _world,\n\
+                 \x20               {actor_expr},\n\
+                 \x20               \"{class_name}\",\n\
+                 \x20               {index},\n\
+                 \x20               \"{}\",\n\
+                 \x20           )",
+                node.node_type
+            ));
+        }
+
+        if node.node_type == "find_object_by_stable_id" || node.node_type == "find_object_by_name" {
+            let needle_pin = node
+                .inputs
+                .iter()
+                .find(|p| !matches!(p.pin.data_type, graphy::DataType::Exec))
+                .ok_or_else(|| {
+                    GraphyError::Custom(format!(
+                        "identity resolver '{}' has no operand input",
+                        node.id
+                    ))
+                })?;
+            let needle = self.generate_input_expression(&node.id, &needle_pin.id)?;
+            let func = if node.node_type == "find_object_by_stable_id" {
+                "find_object_by_stable_id"
+            } else {
+                "find_object_by_name"
+            };
+            return Ok(format!(
+                "pulsar_game::script_refs::{func}(\n\
+                 \x20               _world,\n\
+                 \x20               serde_json::to_value({needle}).unwrap_or(serde_json::Value::Null),\n\
+                 \x20               \"{}\",\n\
+                 \x20           )",
+                node.node_type
+            ));
+        }
+
+        if node.node_type == "object_ref_literal" {
+            let stable_id = node
+                .properties
+                .get("stable_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let class_name = node
+                .properties
+                .get("class_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let component_index = node
+                .properties
+                .get("component_index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            return Ok(format!(
+                "pulsar_game::script_refs::object_literal_json(\n\
+                 \x20               _world,\n\
+                 \x20               \"{stable_id}\",\n\
+                 \x20               \"{class_name}\",\n\
+                 \x20               {component_index},\n\
+                 \x20               \"{}\",\n\
+                 \x20           )",
+                node.node_type
+            ));
+        }
+
+        Err(GraphyError::Custom(format!(
+            "Node '{}' is not an identity reference producer",
+            node.node_type
+        )))
+    }
+
     /// Generate code for `comp_set_prop::{ClassName}::{PropName}` (exec node).
+    ///
+    /// #654: a connected `component_ref` input redirects the write to that
+    /// reference's `(entity, component_index)`; unconnected keeps the
+    /// executing instance's live-typed instance (index 0).
     fn generate_comp_set_prop_node(
         &mut self,
         node: &NodeInstance,
@@ -485,26 +621,33 @@ impl<'a> BlueprintCodeGenerator<'a> {
 
         let indent = "    ".repeat(indent_level);
 
-        // Find the value input pin.
+        // Find the value input pin (never the component_ref pin).
         let value_pin_id = node
             .inputs
             .iter()
+            .filter(|p| p.id != "component_ref" && p.pin.name != "component")
             .find(|p| p.pin.name == "value" || !matches!(p.pin.data_type, graphy::DataType::Exec))
             .map(|p| p.id.clone())
             .ok_or_else(|| GraphyError::Custom(format!("No value pin on comp_set_prop node: {}", node.id)))?;
 
         let value_expr = self.generate_input_expression(&node.id, &value_pin_id)?;
+        let target_expr = self.generate_pin_target_expr(node, class_name)?;
 
         let code = format!(
-            r#"{indent}if let Err(__e) = pulsar_world_registry::dispatch::set_component_property(
-{indent}    _world,
-{indent}    _entity,
-{indent}    "{class_name}",
-{indent}    0,
-{indent}    "{prop_name}",
-{indent}    serde_json::to_value({value_expr}).unwrap_or(serde_json::Value::Null),
-{indent}) {{
-{indent}    tracing::error!("comp_set_prop::{class_name}::{prop_name} failed: {{__e}}");
+            r#"{indent}match {target_expr} {{
+{indent}    Some((__bp_target_entity, __bp_target_index)) => {{
+{indent}        if let Err(__e) = pulsar_world_registry::dispatch::set_component_property(
+{indent}            _world,
+{indent}            __bp_target_entity,
+{indent}            "{class_name}",
+{indent}            __bp_target_index,
+{indent}            "{prop_name}",
+{indent}            serde_json::to_value({value_expr}).unwrap_or(serde_json::Value::Null),
+{indent}        ) {{
+{indent}            tracing::error!("comp_set_prop::{class_name}::{prop_name} failed: {{__e}}");
+{indent}        }}
+{indent}    }}
+{indent}    None => {{}}
 {indent}}}
 "#
         );
@@ -514,6 +657,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
     }
 
     /// Generate code for `comp_call::{ClassName}::{MethodName}` (exec node).
+    ///
+    /// #654: a connected `component_ref` input dispatches the method on that
+    /// reference's actor instead of the executing instance.
     fn generate_comp_call_node(
         &mut self,
         node: &NodeInstance,
@@ -533,12 +679,15 @@ impl<'a> BlueprintCodeGenerator<'a> {
 
         let indent = "    ".repeat(indent_level);
 
-        // Collect data input arguments (skip exec pins), staged as JSON just
-        // like the VM path stages its arena blobs.
+        // Collect data input arguments (skip exec AND component_ref pins),
+        // staged as JSON just like the VM path stages its arena blobs.
         let arg_values: Vec<String> = {
             let mut exprs = Vec::new();
             for input_pin in &node.inputs {
                 if matches!(input_pin.pin.data_type, graphy::DataType::Exec) {
+                    continue;
+                }
+                if input_pin.id == "component_ref" || input_pin.pin.name == "component" {
                     continue;
                 }
                 let expr = self.generate_input_expression(&node.id, &input_pin.id)?;
@@ -554,44 +703,55 @@ impl<'a> BlueprintCodeGenerator<'a> {
         } else {
             format!("vec![{}]", arg_values.join(", "))
         };
+        let target_expr = self.generate_pin_target_expr(node, class_name)?;
         let invoke = format!(
             "pulsar_world_registry::dispatch::invoke_component_method(\
-             _world, _entity, \"{class_name}\", 0, \"{method_name}\", __args)"
+             _world, __bp_target_entity, \"{class_name}\", __bp_target_index, \"{method_name}\", __args)"
         );
 
         let mut code = String::new();
         if has_returns_used(node) {
             let result_var = format!("__comp_result_{}", &node.id[..8.min(node.id.len())]);
             code.push_str(&format!(
-r#"{indent}let {result_var} = match pulsar_world_registry::dispatch::json_args_to_method_args("{class_name}", "{method_name}", {args_vec}) {{
-{indent}    Ok(__args) => match {invoke} {{
-{indent}        Ok(__returned) => __returned
-{indent}            .and_then(|__v| pulsar_world_registry::marshal::any_to_json(
-{indent}                "comp_call::{class_name}::{method_name} return",
-{indent}                __v.as_ref(),
-{indent}            ).ok())
-{indent}            .unwrap_or(serde_json::Value::Null),
-{indent}        Err(__e) => {{
-{indent}            tracing::error!("comp_call::{class_name}::{method_name} failed: {{__e}}");
-{indent}            serde_json::Value::Null
+r#"{indent}let {result_var} = match {target_expr} {{
+{indent}    Some((__bp_target_entity, __bp_target_index)) => {{
+{indent}        match pulsar_world_registry::dispatch::json_args_to_method_args("{class_name}", "{method_name}", {args_vec}) {{
+{indent}            Ok(__args) => match {invoke} {{
+{indent}                Ok(__returned) => __returned
+{indent}                    .and_then(|__v| pulsar_world_registry::marshal::any_to_json(
+{indent}                        "comp_call::{class_name}::{method_name} return",
+{indent}                        __v.as_ref(),
+{indent}                    ).ok())
+{indent}                    .unwrap_or(serde_json::Value::Null),
+{indent}                Err(__e) => {{
+{indent}                    tracing::error!("comp_call::{class_name}::{method_name} failed: {{__e}}");
+{indent}                    serde_json::Value::Null
+{indent}                }}
+{indent}            }},
+{indent}            Err(__e) => {{
+{indent}                tracing::error!("comp_call::{class_name}::{method_name} arguments: {{__e}}");
+{indent}                serde_json::Value::Null
+{indent}            }}
 {indent}        }}
-{indent}    }},
-{indent}    Err(__e) => {{
-{indent}        tracing::error!("comp_call::{class_name}::{method_name} arguments: {{__e}}");
-{indent}        serde_json::Value::Null
 {indent}    }}
+{indent}    None => serde_json::Value::Null,
 {indent}}};
 "#
             ));
         } else {
             code.push_str(&format!(
-r#"{indent}match pulsar_world_registry::dispatch::json_args_to_method_args("{class_name}", "{method_name}", {args_vec}) {{
-{indent}    Ok(__args) => {{
-{indent}        if let Err(__e) = {invoke} {{
-{indent}            tracing::error!("comp_call::{class_name}::{method_name} failed: {{__e}}");
+r#"{indent}match {target_expr} {{
+{indent}    Some((__bp_target_entity, __bp_target_index)) => {{
+{indent}        match pulsar_world_registry::dispatch::json_args_to_method_args("{class_name}", "{method_name}", {args_vec}) {{
+{indent}            Ok(__args) => {{
+{indent}                if let Err(__e) = {invoke} {{
+{indent}                    tracing::error!("comp_call::{class_name}::{method_name} failed: {{__e}}");
+{indent}                }}
+{indent}            }}
+{indent}            Err(__e) => tracing::error!("comp_call::{class_name}::{method_name} arguments: {{__e}}"),
 {indent}        }}
 {indent}    }}
-{indent}    Err(__e) => tracing::error!("comp_call::{class_name}::{method_name} arguments: {{__e}}"),
+{indent}    None => {{}}
 {indent}}}
 "#
             ));
@@ -887,6 +1047,19 @@ r#"{indent}match pulsar_world_registry::dispatch::json_args_to_method_args("{cla
                 // Check if source is a component property getter (pure)
                 if source_node.node_type.starts_with("comp_get_prop::") {
                     return self.generate_comp_get_prop_expr(source_node);
+                }
+
+                // Check if source is an identity reference producer (#654):
+                // get_component_ref / find_object_by_* / object_ref_literal.
+                if source_node
+                    .node_type
+                    .strip_prefix("get_component_ref::")
+                    .is_some()
+                    || source_node.node_type == "find_object_by_stable_id"
+                    || source_node.node_type == "find_object_by_name"
+                    || source_node.node_type == "object_ref_literal"
+                {
+                    return self.identity_producer_expr(source_node_id);
                 }
 
                 // Check if source is a variable getter
