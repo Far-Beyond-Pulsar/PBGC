@@ -201,10 +201,19 @@ impl<'a> BlueprintCodeGenerator<'a> {
     fn generate_event_function(&self, event_node: &NodeInstance) -> Result<String, GraphyError> {
         let mut code = String::new();
 
+        // Every generated logic function receives the live-world slice
+        // (#651): the `(entity, world)` pair the enclosing `impl Actor`
+        // callback got from the engine. Component nodes compile to
+        // dispatcher calls against exactly these parameters. Types are
+        // fully qualified because this module only glob-imports
+        // `pulsar_std`/vars, which must never shadow them.
+        const LIVE_WORLD_PARAMS: &str =
+            "_entity: pulsar_game::Entity, _world: &mut pulsar_game::World";
+
         // Custom event nodes don't have static metadata — infer from the node itself.
         if event_node.node_type.starts_with("on_") {
             let func_name = event_node.node_type.clone();
-            let params: Vec<String> = event_node.outputs.iter()
+            let mut params: Vec<String> = event_node.outputs.iter()
                 .filter(|p| !matches!(p.pin.data_type, graphy::DataType::Exec))
                 .map(|p| {
                     let type_str = match &p.pin.data_type {
@@ -214,6 +223,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
                     format!("{}: {}", p.id, type_str)
                 })
                 .collect();
+            params.push(LIVE_WORLD_PARAMS.to_string());
             code.push_str(&format!("pub fn {}({}) {{\n", func_name, params.join(", ")));
             let indent = "    ";
             // Generate pure node preamble
@@ -243,12 +253,13 @@ impl<'a> BlueprintCodeGenerator<'a> {
             .get_node_metadata(&event_node.node_type)
             .ok_or_else(|| GraphyError::NodeNotFound(event_node.node_type.clone()))?;
 
-        // Generate function signature — include any event parameters (e.g. delta_time for on_tick)
-        let params: String = metadata.params.iter()
+        // Generate function signature — include any event parameters (e.g. delta_time for on_tick),
+        // then the live-world slice every generated function receives (#651).
+        let mut params: Vec<String> = metadata.params.iter()
             .map(|p| format!("{}: {}", p.name, p.param_type))
-            .collect::<Vec<_>>()
-            .join(", ");
-        code.push_str(&format!("pub fn {}({}) {{\n", metadata.name, params));
+            .collect();
+        params.push(LIVE_WORLD_PARAMS.to_string());
+        code.push_str(&format!("pub fn {}({}) {{\n", metadata.name, params.join(", ")));
 
         let pure_preamble = self.generate_pure_node_preamble(1)?;
         if !pure_preamble.is_empty() {
@@ -416,6 +427,15 @@ impl<'a> BlueprintCodeGenerator<'a> {
     }
 
     // ── Component node codegen ────────────────────────────────────────────────
+    //
+    // All three kinds compile to `pulsar_world_registry::dispatch` calls
+    // against the live-world parameters of the enclosing generated function
+    // (#651) — C's #643 dispatcher is THE one dispatch layer, with the VM's
+    // arena trampolines as the other adapter. Values travel in the graph's
+    // JSON domain exactly like the VM path: method arguments are converted
+    // to their declared parameter types by `json_args_to_method_args`
+    // before dispatch, and every failure logs and degrades to JSON null
+    // instead of aborting the event.
 
     /// Generate a component property getter expression (pure, inline).
     ///
@@ -433,13 +453,15 @@ impl<'a> BlueprintCodeGenerator<'a> {
             .next()
             .ok_or_else(|| GraphyError::Custom("Missing prop name in comp_get_prop".into()))?;
 
-        // Return the raw JSON value; downstream nodes cast it as needed.
-        // This avoids needing to know the concrete Rust type at codegen time.
         Ok(format!(
-            r#"pulsar_game::__bp_with_comp(|__store| {{
-                __store.get_property_json("{class_name}", "{prop_name}")
-                    .unwrap_or(serde_json::Value::Null)
-            }})"#
+            r#"pulsar_world_registry::dispatch::get_component_property(
+                _world,
+                _entity,
+                "{class_name}",
+                0,
+                "{prop_name}",
+            )
+            .unwrap_or(serde_json::Value::Null)"#
         ))
     }
 
@@ -473,31 +495,22 @@ impl<'a> BlueprintCodeGenerator<'a> {
 
         let value_expr = self.generate_input_expression(&node.id, &value_pin_id)?;
 
-        let mut code = format!(
-            r#"{indent}pulsar_game::__bp_with_comp(|__store| {{
-{indent}    __store.set_property_json(
-{indent}        "{class_name}",
-{indent}        "{prop_name}",
-{indent}        serde_json::to_value({value_expr}).unwrap_or(serde_json::Value::Null),
-{indent}    );
-{indent}}});
+        let code = format!(
+            r#"{indent}if let Err(__e) = pulsar_world_registry::dispatch::set_component_property(
+{indent}    _world,
+{indent}    _entity,
+{indent}    "{class_name}",
+{indent}    0,
+{indent}    "{prop_name}",
+{indent}    serde_json::to_value({value_expr}).unwrap_or(serde_json::Value::Null),
+{indent}) {{
+{indent}    tracing::error!("comp_set_prop::{class_name}::{prop_name} failed: {{__e}}");
+{indent}}}
 "#
         );
 
         // Follow exec chain.
-        for output_pin in &node.outputs {
-            if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
-                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
-                for next_node_id in connected {
-                    if let Some(next_node) = self.graph.nodes.get(next_node_id) {
-                        let next_code = self.generate_exec_chain(next_node, indent_level)?;
-                        code.push_str(&next_code);
-                    }
-                }
-            }
-        }
-
-        Ok(code)
+        self.follow_exec_outputs(node, indent_level).map(|chain| format!("{code}{chain}"))
     }
 
     /// Generate code for `comp_call::{ClassName}::{MethodName}` (exec node).
@@ -520,8 +533,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
 
         let indent = "    ".repeat(indent_level);
 
-        // Collect data input arguments (skip exec pins).
-        let arg_exprs: Vec<String> = {
+        // Collect data input arguments (skip exec pins), staged as JSON just
+        // like the VM path stages its arena blobs.
+        let arg_values: Vec<String> = {
             let mut exprs = Vec::new();
             for input_pin in &node.inputs {
                 if matches!(input_pin.pin.data_type, graphy::DataType::Exec) {
@@ -535,26 +549,68 @@ impl<'a> BlueprintCodeGenerator<'a> {
             exprs
         };
 
-        let args_vec = if arg_exprs.is_empty() {
+        let args_vec = if arg_values.is_empty() {
             "vec![]".to_string()
         } else {
-            format!("vec![{}]", arg_exprs.join(", "))
+            format!("vec![{}]", arg_values.join(", "))
         };
-
-        let call_expr = format!(
-            r#"pulsar_game::__bp_with_comp(|__store| {{
-{indent}    __store.call_method_json("{class_name}", "{method_name}", {args_vec})
-{indent}}})"#
+        let invoke = format!(
+            "pulsar_world_registry::dispatch::invoke_component_method(\
+             _world, _entity, \"{class_name}\", 0, \"{method_name}\", __args)"
         );
 
-        let mut code = if has_returns_used(node) {
+        let mut code = String::new();
+        if has_returns_used(node) {
             let result_var = format!("__comp_result_{}", &node.id[..8.min(node.id.len())]);
-            format!("{indent}let {result_var} = {call_expr};\n")
+            code.push_str(&format!(
+r#"{indent}let {result_var} = match pulsar_world_registry::dispatch::json_args_to_method_args("{class_name}", "{method_name}", {args_vec}) {{
+{indent}    Ok(__args) => match {invoke} {{
+{indent}        Ok(__returned) => __returned
+{indent}            .and_then(|__v| pulsar_world_registry::marshal::any_to_json(
+{indent}                "comp_call::{class_name}::{method_name} return",
+{indent}                __v.as_ref(),
+{indent}            ).ok())
+{indent}            .unwrap_or(serde_json::Value::Null),
+{indent}        Err(__e) => {{
+{indent}            tracing::error!("comp_call::{class_name}::{method_name} failed: {{__e}}");
+{indent}            serde_json::Value::Null
+{indent}        }}
+{indent}    }},
+{indent}    Err(__e) => {{
+{indent}        tracing::error!("comp_call::{class_name}::{method_name} arguments: {{__e}}");
+{indent}        serde_json::Value::Null
+{indent}    }}
+{indent}}};
+"#
+            ));
         } else {
-            format!("{indent}{call_expr};\n")
-        };
+            code.push_str(&format!(
+r#"{indent}match pulsar_world_registry::dispatch::json_args_to_method_args("{class_name}", "{method_name}", {args_vec}) {{
+{indent}    Ok(__args) => {{
+{indent}        if let Err(__e) = {invoke} {{
+{indent}            tracing::error!("comp_call::{class_name}::{method_name} failed: {{__e}}");
+{indent}        }}
+{indent}    }}
+{indent}    Err(__e) => tracing::error!("comp_call::{class_name}::{method_name} arguments: {{__e}}"),
+{indent}}}
+"#
+            ));
+        }
 
         // Follow exec chain.
+        self.follow_exec_outputs(node, indent_level).map(|chain| format!("{code}{chain}"))
+    }
+
+    /// Emit every exec-chain successor of `node` at the same indent level.
+    ///
+    /// Shared tail of the exec-node generators (function/setter/component
+    /// nodes all continue their chains identically).
+    fn follow_exec_outputs(
+        &mut self,
+        node: &NodeInstance,
+        indent_level: usize,
+    ) -> Result<String, GraphyError> {
+        let mut code = String::new();
         for output_pin in &node.outputs {
             if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
                 let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
@@ -566,7 +622,6 @@ impl<'a> BlueprintCodeGenerator<'a> {
                 }
             }
         }
-
         Ok(code)
     }
 

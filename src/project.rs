@@ -18,7 +18,18 @@
 //!    (`pulsar_game::blueprint_codegen_drift`); any drift fails
 //!    `cargo test -p pulsar_game`.
 //! 2. `just ci-drift-check` additionally generates a full game project into a
-//!     temp dir and runs `cargo check` on it against current pins.
+//!    temp dir and runs `cargo check` on it against current pins.
+//!
+//! # Live-world component routing (#651)
+//!
+//! Generated actors carry NO private component state. Every `comp_*` graph
+//! node compiles to a `pulsar_world_registry::dispatch::*` call against the
+//! `(entity, world)` pair every `Actor` callback receives — the SAME
+//! dispatcher the VM path uses, so mutations land in SceneDB and fire its
+//! subscription/GPU events exactly like properties-panel edits. Prefab
+//! component declarations hydrate onto the actor's own scene entity at
+//! `begin_play`, and only when the scene hasn't already provided the
+//! component (per-instance overrides win over baked-in defaults).
 //!
 //! ## Updating the vendored copy / the pin
 //!
@@ -348,128 +359,13 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
     let ident = to_snake_case(&bp.name);
     let ty = to_pascal_case(&bp.name);
 
-    let has_components = !bp.components.is_empty();
-
-    // ── Component init block ──────────────────────────────────────────────────
-    // Generates the `__init_components` method body that constructs each
-    // component from the prefab defaults baked in at compile time.
-    let init_components_body: String = if has_components {
-        let mut lines = String::new();
-        for comp in &bp.components {
-            if !comp.enabled {
-                continue;
-            }
-            // Serialize the JSON defaults so they can be embedded as a string literal.
-            let json_str = serde_json::to_string(&comp.property_defaults)
-                .unwrap_or_else(|_| "{}".to_string())
-                .replace('\\', "\\\\")
-                .replace('"', "\\\"");
-            let class = &comp.class_name;
-            lines.push_str(&format!(
-                "        std::sync::Arc::get_mut(&mut self.components).expect(\"exclusive Arc\").add_from_registry(\"{class}\", &serde_json::from_str(\"{json_str}\").unwrap_or(serde_json::json!({{}})));\n"
-            ));
-        }
-        lines
-    } else {
-        "        // No components on this prefab.\n".to_string()
-    };
+    let enabled_components: Vec<&CompiledComponent> =
+        bp.components.iter().filter(|c| c.enabled).collect();
+    let has_components = !enabled_components.is_empty();
 
     // ── Set up custom events ──────────────────────────────────────────────────
     let has_custom_events = bp.source.contains("on_player_died")
         || bp.source.contains("emit_event");
-    let init_events_body = if has_custom_events {
-        "\
-        // Register custom event handlers (added by PBGC for custom blueprint events).\n\
-        // Subscriptions are set up here so they are active before begin_play runs.\n".to_string()
-    } else {
-        String::new()
-    };
-
-    // ── begin_play body ───────────────────────────────────────────────────────
-    let begin_play_body = {
-        let mut body = String::new();
-        // Always initialise components first (idempotent after first call).
-        if has_components {
-            body.push_str("        self.__init_components();\n");
-            // Run any component begin_plays via reflection.
-            body.push_str("        self.__run_component_begin_plays();\n");
-        }
-        // Set the thread-local execution context so logic fns can access components.
-        if has_components {
-            body.push_str(
-                "        pulsar_game::__bp_set_comp_ctx(std::sync::Arc::get_mut(&mut self.components).expect(\"exclusive Arc\"));\n",
-            );
-        }
-        if has_custom_events && !init_events_body.is_empty() {
-            body.push_str("        self.__init_events();\n");
-        }
-        if bp.has_begin_play {
-            body.push_str("        logic::begin_play();\n");
-        } else {
-            body.push_str("        // No begin_play event in this blueprint.\n");
-        }
-        if has_components {
-            body.push_str("        pulsar_game::__bp_clear_comp_ctx();\n");
-        }
-        body
-    };
-
-    // ── tick body ─────────────────────────────────────────────────────────────
-    let tick_body = {
-        let mut body = String::new();
-        if has_components {
-            body.push_str(
-                "        pulsar_game::__bp_set_comp_ctx(std::sync::Arc::get_mut(&mut self.components).expect(\"exclusive Arc\"));\n",
-            );
-        }
-        if bp.has_tick {
-            body.push_str("        logic::tick();\n");
-        } else {
-            body.push_str("        // No tick event in this blueprint.\n");
-        }
-        if has_components {
-            body.push_str("        pulsar_game::__bp_clear_comp_ctx();\n");
-        }
-        body
-    };
-
-    // ── Set up custom events ──────────────────────────────────────────────────
-    let has_custom_events = bp.source.contains("on_player_died")
-        || bp.source.contains("emit_event");
-    let init_events_body = if has_custom_events {
-        "\
-        // Register custom event handlers (added by PBGC for custom blueprint events).\n\
-        // Subscriptions are set up here so they are active before begin_play runs.\n".to_string()
-    } else {
-        String::new()
-    };
-
-    // ── Struct definition ─────────────────────────────────────────────────────
-    // No per-instance event bus yet: the runtime `EventBus` type does not exist
-    // anywhere in the pinned graph (Pulsar-Native#652 removed the phantom
-    // `gamma_core` reference that used to live here). Custom events currently
-    // compile to empty `__init_events` bodies; reintroduce a bus field only
-    // against a crate that actually ships the type.
-    let struct_def = if has_components {
-        format!(
-            r#"pub struct {ty} {{
-    /// Runtime component store — populated lazily in `begin_play`.
-    pub components: std::sync::Arc<pulsar_game::ComponentStore>,
-}}"#
-        )
-    } else {
-        format!("pub struct {ty} {{}}")
-    };
-
-    let new_body = if has_components {
-        format!(
-            "Self {{ components: std::sync::Arc::new(pulsar_game::ComponentStore::new()) }}"
-        )
-    } else {
-        "Self { }".to_string()
-    };
-
-    // ── Component helper impls ────────────────────────────────────────────────
     let event_helpers = if has_custom_events {
         format!(
             r#"
@@ -477,7 +373,9 @@ impl {ty} {{
     /// Initialise custom event subscriptions.
     /// Called at the start of `begin_play`.
     pub fn __init_events(&mut self) {{
-{init_events_body}    }}
+        // Register custom event handlers (added by PBGC for custom blueprint events).
+        // Subscriptions are set up here so they are active before begin_play runs.
+    }}
 }}
 "#
         )
@@ -485,30 +383,93 @@ impl {ty} {{
         String::new()
     };
 
+    // ── begin_play body ───────────────────────────────────────────────────────
+    let mut begin_play_body = String::new();
+    if has_components {
+        begin_play_body.push_str("        Self::__init_components(_entity, _world);\n");
+        begin_play_body.push_str("        Self::__run_component_begin_plays(_entity, _world);\n");
+    }
+    if has_custom_events {
+        begin_play_body.push_str("        self.__init_events();\n");
+    }
+    if bp.has_begin_play {
+        begin_play_body.push_str("        logic::begin_play(_entity, _world);\n");
+    } else {
+        begin_play_body.push_str("        // No begin_play event in this blueprint.\n");
+    }
+
+    // ── tick body ─────────────────────────────────────────────────────────────
+    let tick_body = if bp.has_tick {
+        "        logic::tick(_entity, _world);\n".to_string()
+    } else {
+        "        // No tick event in this blueprint.\n".to_string()
+    };
+
+    // ── Component helper impls ────────────────────────────────────────────────
+    // Live-world hydration (#651): prefab defaults seed the actor's OWN scene
+    // entity, and only where the scene hasn't already provided the component.
     let component_helpers = if has_components {
+        let mut init_body = String::new();
+        let mut begin_plays_body = String::new();
+        for comp in &enabled_components {
+            let class = &comp.class_name;
+            // Serialize the JSON defaults so they can be embedded as a string literal.
+            let json_str = serde_json::to_string(&comp.property_defaults)
+                .unwrap_or_else(|_| "{}".to_string())
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            init_body.push_str(&format!(
+                r#"        if !pulsar_world_registry::world_component_present_for_class("{class}", world, entity) {{
+            if let Err(__e) = pulsar_world_registry::hydrate_world_component_for_class(
+                "{class}",
+                world,
+                entity,
+                &serde_json::from_str::<serde_json::Value>("{json_str}").unwrap_or_else(|_| serde_json::json!({{}})),
+            ) {{
+                tracing::error!("blueprint `{ident}`: hydrating {class} failed: {{__e}}");
+            }}
+        }}
+"#,
+                class = class,
+                json_str = json_str,
+                ident = ident,
+            ));
+            begin_plays_body.push_str(&format!(
+                r#"        if pulsar_reflection::REGISTRY.get_method("{class}", "begin_play").is_some() {{
+            if let Err(__e) = pulsar_world_registry::dispatch::invoke_component_method(
+                world,
+                entity,
+                "{class}",
+                0,
+                "begin_play",
+                vec![],
+            ) {{
+                tracing::error!("blueprint `{ident}`: {class}::begin_play failed: {{__e}}");
+            }}
+        }}
+"#,
+                class = class,
+                ident = ident,
+            ));
+        }
         format!(
             r#"
 impl {ty} {{
-    /// Initialise components from the prefab defaults baked in at compile time.
+    /// Ensure every enabled prefab component exists on the actor's scene
+    /// entity in the LIVE world (#651).
     ///
-    /// Idempotent — does nothing if components are already present.
-    pub fn __init_components(&mut self) {{
-        if !self.components.is_empty() {{ return; }}
-{init_components_body}    }}
+    /// Idempotent AND scene-respecting: hydration fires only when the class
+    /// is absent, so per-instance values the scene already hydrated win over
+    /// the defaults baked in at compile time. Classes without a live World
+    /// registration are left to the JSON channel. Failures log and continue —
+    /// one bad component never blocks the actor.
+    pub fn __init_components(entity: Entity, world: &mut World) {{
+{init_body}    }}
 
-    /// Call `begin_play` on each component that implements it.
-    pub fn __run_component_begin_plays(&mut self) {{
-        let class_names: Vec<String> = self.components.iter().map(|(name, _)| name.to_string()).collect();
-        for class_name in &class_names {{
-            if let Some(methods) = pulsar_reflection::REGISTRY.get_methods(class_name) {{
-                if let Some(bp_method) = methods.into_iter().find(|m| m.name == "begin_play") {{
-                    if let Some(comp) = std::sync::Arc::get_mut(&mut self.components).expect("exclusive Arc").get_by_name_mut(class_name) {{
-                        (bp_method.caller)(comp, vec![]);
-                    }}
-                }}
-            }}
-        }}
-    }}
+    /// Call `begin_play` on each declared component class that implements it,
+    /// through the same live-world dispatcher graph nodes use.
+    pub fn __run_component_begin_plays(entity: Entity, world: &mut World) {{
+{begin_plays_body}    }}
 }}
 "#
         )
@@ -528,12 +489,6 @@ impl {ty} {{
         })
         .collect();
 
-    let extra_imports = if has_components {
-        "use pulsar_reflection;\n#[allow(unused_imports)]\nuse serde_json;\n"
-    } else {
-        ""
-    };
-
     // events.rs lives at <Class>/events/events.rs and is declared as a sub-module
     // of <Class>/events/mod.rs. The module path is therefore:
     //   crate::classes::<Class>::events::events          (outer struct/impls)
@@ -547,21 +502,25 @@ impl {ty} {{
     format!(
         r#"//! Blueprint actor: `{ident}`
 //! Generated by PBGC. Do not hand-edit — changes will be overwritten.
+//!
+//! Component access goes through `pulsar_world_registry`'s dispatcher
+//! against the LIVE world each `Actor` callback receives (#651) — there is
+//! no private component store.
 
 use pulsar_game::prelude::*;
 use engine_class_derive::EngineClass;
 #[allow(unused_imports)]
 use pulsar_std::*;
-{extra_imports}
+
 // vars lives two levels up: <Class>::events::events → <Class>::events → <Class>
 #[allow(unused_imports)]
 use super::super::vars::*;
 
 #[derive(EngineClass, Clone)]
-{struct_def}
+pub struct {ty} {{}}
 
 impl {ty} {{
-    pub fn new() -> Self {{ {new_body} }}
+    pub fn new() -> Self {{ Self {{ }} }}
 }}
 
 impl Default for {ty} {{
@@ -705,13 +664,19 @@ mod tests {
     use super::*;
 
     fn sample_spec() -> ProjectSpec {
-        let source = "pub fn begin_play() { let x = add(1.0, 2.0); print_number(x); }";
+        // Raw sources here stand in for ALREADY-COMPILED PBGC logic, which
+        // since #651 carries the live-world parameters on every event fn.
+        let source = "pub fn begin_play(_entity: pulsar_game::Entity, _world: &mut pulsar_game::World) { let x = add(1.0, 2.0); print_number(x); }";
         ProjectSpec::new("my_game")
             .version("0.1.0")
             .description("A test Pulsar game")
             .add_blueprint(CompiledBlueprint::new("player_controller", source))
             .add_blueprint(
-                CompiledBlueprint::new("enemy_ai", "pub fn tick() { }").with_tick(true),
+                CompiledBlueprint::new(
+                    "enemy_ai",
+                    "pub fn tick(_entity: pulsar_game::Entity, _world: &mut pulsar_game::World) { }",
+                )
+                .with_tick(true),
             )
     }
 
@@ -750,22 +715,94 @@ mod tests {
             !actor.contains("gamma_core"),
             "emitted code may only reference crates present in the pinned graph"
         );
-        assert!(actor.contains("logic::begin_play()"));
+        assert!(actor.contains("logic::begin_play(_entity, _world)"));
         assert!(actor.contains("No tick event in this blueprint"));
+        // #651: the baked-store routing must never reappear.
+        assert!(
+            !actor.contains("__bp_with_comp") && !actor.contains("__bp_set_comp_ctx"),
+            "generated actors address the live world through the dispatcher, \
+             not the retired thread-local ComponentStore context"
+        );
     }
 
     #[test]
     fn generate_actor_source_includes_engineclass_derive() {
-        let actor = generate_blueprint_actor_source("player_controller", "pub fn begin_play() {}\n");
+        let actor = generate_blueprint_actor_source(
+            "player_controller",
+            "pub fn begin_play(_entity: pulsar_game::Entity, _world: &mut pulsar_game::World) {}\n",
+        );
         assert!(actor.contains("pub struct PlayerController"));
         assert!(actor.contains("#[derive(EngineClass, Clone)]"));
+    }
+
+    /// #651: prefab components hydrate onto the actor's LIVE scene entity
+    /// (absent-only, scene overrides win) instead of a private baked store.
+    #[test]
+    fn component_bearing_actors_hydrate_the_live_world() {
+        let source =
+            "pub fn begin_play(_entity: pulsar_game::Entity, _world: &mut pulsar_game::World) { }";
+        let bp = CompiledBlueprint::new("light_probe", source)
+            .with_begin_play(true)
+            .with_components(vec![CompiledComponent {
+                class_name: "LightComponent".to_string(),
+                property_defaults: serde_json::json!({ "intensity": 1000.0 }),
+                enabled: true,
+            }]);
+        let spec = ProjectSpec::new("live_world_probes").add_blueprint(bp);
+        let project = generate_project(&spec);
+        let actor = &project.files["src/classes/light_probe/events/events.rs"];
+
+        assert!(
+            actor.contains("pub struct LightProbe {}"),
+            "no private component state may be emitted:\n{actor}"
+        );
+        assert!(!actor.contains("ComponentStore"));
+        assert!(actor.contains("__init_components(entity: Entity, world: &mut World)"));
+        assert!(
+            actor.contains("world_component_present_for_class(\"LightComponent\", world, entity)"),
+            "hydration must be gated on live-world presence so scene-provided \
+             per-instance values win:\n{actor}"
+        );
+        assert!(actor.contains("hydrate_world_component_for_class("));
+        assert!(
+            actor.contains("1000.0"),
+            "baked defaults must survive embedding:\n{actor}"
+        );
+        assert!(actor.contains("Self::__init_components(_entity, _world);"));
+    }
+
+    /// #651: disabled prefab components are skipped entirely — they hydrate
+    /// nowhere and receive no begin_play dispatch.
+    #[test]
+    fn disabled_prefab_components_are_not_emitted() {
+        let source =
+            "pub fn begin_play(_entity: pulsar_game::Entity, _world: &mut pulsar_game::World) { }";
+        let bp = CompiledBlueprint::new("dark_probe", source).with_components(vec![
+            CompiledComponent {
+                class_name: "LightComponent".to_string(),
+                property_defaults: serde_json::json!({}),
+                enabled: false,
+            },
+            CompiledComponent {
+                class_name: "RigidbodyComponent".to_string(),
+                property_defaults: serde_json::json!({}),
+                enabled: true,
+            },
+        ]);
+        let spec = ProjectSpec::new("enabled_probes").add_blueprint(bp);
+        let project = generate_project(&spec);
+        let actor = &project.files["src/classes/dark_probe/events/events.rs"];
+
+        assert!(!actor.contains("\"LightComponent\""));
+        assert!(actor.contains("\"RigidbodyComponent\""));
     }
 
     #[test]
     fn enemy_actor_wires_tick() {
         let project = generate_project(&sample_spec());
         let actor = &project.files["src/classes/enemy_ai/events/events.rs"];
-        assert!(actor.contains("logic::tick()"));
+        // #651: tick logic receives the live-world slice from the Actor impl.
+        assert!(actor.contains("logic::tick(_entity, _world)"));
     }
 
     #[test]
@@ -830,7 +867,7 @@ thread_local! {
 }
 // PBGC_VARIABLE_STORAGE_END
 
-pub fn begin_play() { }
+pub fn begin_play(_entity: pulsar_game::Entity, _world: &mut pulsar_game::World) { }
 "#;
 
         let bp = CompiledBlueprint::new("player", source).with_variables(vec![CompiledVariable {

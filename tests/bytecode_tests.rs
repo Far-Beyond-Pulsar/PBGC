@@ -915,3 +915,62 @@ fn comp_get_result_flows_into_set_through_arena() {
         "set:Light:intensity:42.5".to_string(),
     ]);
 }
+
+// ── Rust-source emission (#651) ───────────────────────────────────────────────
+//
+// The same graphs also compile to generated actor source. That emission must
+// route through `pulsar_world_registry`'s dispatcher against the live-world
+// `(entity, world)` parameters and never re-introduce the retired
+// baked-store routing (`__bp_with_comp` + private `ComponentStore`).
+
+#[test]
+fn rust_emission_routes_comp_ops_through_the_live_dispatcher() {
+    let mut g = GraphDescription::new("rust_comp");
+    g.add_node(begin("be"));
+    g.add_node(comp_get_node("get", "Light", "intensity"));
+    g.add_node(comp_set_node("set", "Light", "intensity", Some(7.0)));
+    g.add_node(comp_call_node("call", "Door", "open", true));
+    g.add_connection(exec("begin", "be", "set", "set_e"));
+    g.add_connection(data("get", "get_r", "set", "set_v"));
+    g.add_connection(exec("set", "set_o", "call", "call_e"));
+
+    let logic = pbgc::compile_graph(&g).expect("rust compilation");
+    let actor = pbgc::generate_blueprint_actor_source_with_components(
+        "rust_probe",
+        &logic,
+        vec![pbgc::CompiledComponent {
+            class_name: "Light".to_string(),
+            property_defaults: serde_json::json!({ "intensity": 1.0 }),
+            enabled: true,
+        }],
+    );
+
+    // Dispatcher calls addressed at the live-world parameters.
+    assert!(
+        actor.contains("pulsar_world_registry::dispatch::get_component_property("),
+        "comp_get_prop must read through the live dispatcher:\n{actor}"
+    );
+    assert!(
+        actor.contains("pulsar_world_registry::dispatch::set_component_property(\n"),
+        "comp_set_prop must write through the live dispatcher:\n{actor}"
+    );
+    assert!(
+        actor.contains("json_args_to_method_args(\"Door\", \"open\"")
+            && actor.contains("invoke_component_method(_world, _entity, \"Door\", 0, \"open\", __args)"),
+        "comp_call must dispatch through the shared JSON->typed conversion:\n{actor}"
+    );
+    // Generated event functions receive the live world from the Actor impl.
+    assert!(actor.contains(
+        "pub fn begin_play(_entity: pulsar_game::Entity, _world: &mut pulsar_game::World)"
+    ));
+    // Live-world hydration of prefab components.
+    assert!(actor.contains("world_component_present_for_class(\"Light\""));
+    assert!(actor.contains("hydrate_world_component_for_class("));
+
+    // The retired baked-store routing must be gone outright (#651).
+    assert!(!actor.contains("__bp_with_comp"));
+    assert!(!actor.contains("__bp_set_comp_ctx"));
+    assert!(!actor.contains("__bp_clear_comp_ctx"));
+    assert!(!actor.contains("ComponentStore"));
+    assert!(!actor.contains("gamma_core"));
+}
