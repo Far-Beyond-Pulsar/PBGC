@@ -9,8 +9,11 @@ use graphy::{
     Connection, ConnectionType, DataType, GraphDescription, NodeInstance, Pin, PinInstance,
     PinType, Position,
 };
+use pbgc::{
+    compile_graph, compile_graph_to_bytecode, compile_graph_to_bytecode_with_variables, BpProgram,
+    Instruction,
+};
 use std::collections::HashMap;
-use pbgc::{compile_graph, compile_graph_to_bytecode, compile_graph_to_bytecode_with_variables, BpProgram, Instruction};
 
 // ── Native dispatch shims (mirrors what pulsar_macros #[blueprint] generates) ─
 //
@@ -19,58 +22,58 @@ use pbgc::{compile_graph, compile_graph_to_bytecode, compile_graph_to_bytecode_w
 //   ret     → pointer to the output region in the arena
 
 unsafe extern "C" fn shim_add(args: *const *const u8, ret: *mut u8) {
-    let a = std::ptr::read(*args           as *const i64);
-    let b = std::ptr::read(*args.add(1)    as *const i64);
+    let a = std::ptr::read(*args as *const i64);
+    let b = std::ptr::read(*args.add(1) as *const i64);
     std::ptr::write(ret as *mut i64, a + b);
 }
 unsafe extern "C" fn shim_subtract(args: *const *const u8, ret: *mut u8) {
-    let a = std::ptr::read(*args           as *const i64);
-    let b = std::ptr::read(*args.add(1)    as *const i64);
+    let a = std::ptr::read(*args as *const i64);
+    let b = std::ptr::read(*args.add(1) as *const i64);
     std::ptr::write(ret as *mut i64, a - b);
 }
 unsafe extern "C" fn shim_multiply(args: *const *const u8, ret: *mut u8) {
-    let a = std::ptr::read(*args           as *const i64);
-    let b = std::ptr::read(*args.add(1)    as *const i64);
+    let a = std::ptr::read(*args as *const i64);
+    let b = std::ptr::read(*args.add(1) as *const i64);
     std::ptr::write(ret as *mut i64, a * b);
 }
 unsafe extern "C" fn shim_divide(args: *const *const u8, ret: *mut u8) {
-    let a = std::ptr::read(*args           as *const i64);
-    let b = std::ptr::read(*args.add(1)    as *const i64);
+    let a = std::ptr::read(*args as *const i64);
+    let b = std::ptr::read(*args.add(1) as *const i64);
     std::ptr::write(ret as *mut i64, if b == 0 { 0 } else { a / b });
 }
 unsafe extern "C" fn shim_modulo(args: *const *const u8, ret: *mut u8) {
-    let a = std::ptr::read(*args           as *const i64);
-    let b = std::ptr::read(*args.add(1)    as *const i64);
+    let a = std::ptr::read(*args as *const i64);
+    let b = std::ptr::read(*args.add(1) as *const i64);
     std::ptr::write(ret as *mut i64, if b == 0 { 0 } else { a % b });
 }
 unsafe extern "C" fn shim_greater_than(args: *const *const u8, ret: *mut u8) {
-    let a = std::ptr::read(*args           as *const f64);
-    let b = std::ptr::read(*args.add(1)    as *const f64);
+    let a = std::ptr::read(*args as *const f64);
+    let b = std::ptr::read(*args.add(1) as *const f64);
     std::ptr::write(ret as *mut bool, a > b);
 }
 unsafe extern "C" fn shim_less_than(args: *const *const u8, ret: *mut u8) {
-    let a = std::ptr::read(*args           as *const f64);
-    let b = std::ptr::read(*args.add(1)    as *const f64);
+    let a = std::ptr::read(*args as *const f64);
+    let b = std::ptr::read(*args.add(1) as *const f64);
     std::ptr::write(ret as *mut bool, a < b);
 }
 unsafe extern "C" fn shim_abs(args: *const *const u8, ret: *mut u8) {
-    let v = std::ptr::read(*args           as *const f64);
+    let v = std::ptr::read(*args as *const f64);
     std::ptr::write(ret as *mut f64, v.abs());
 }
 unsafe extern "C" fn shim_sqrt(args: *const *const u8, ret: *mut u8) {
-    let v = std::ptr::read(*args           as *const f64);
+    let v = std::ptr::read(*args as *const f64);
     std::ptr::write(ret as *mut f64, v.sqrt());
 }
 unsafe extern "C" fn shim_lerp(args: *const *const u8, ret: *mut u8) {
-    let a = std::ptr::read(*args           as *const f64);
-    let b = std::ptr::read(*args.add(1)    as *const f64);
-    let t = std::ptr::read(*args.add(2)    as *const f64);
+    let a = std::ptr::read(*args as *const f64);
+    let b = std::ptr::read(*args.add(1) as *const f64);
+    let t = std::ptr::read(*args.add(2) as *const f64);
     std::ptr::write(ret as *mut f64, a + (b - a) * t);
 }
 unsafe extern "C" fn shim_clamp(args: *const *const u8, ret: *mut u8) {
-    let v   = std::ptr::read(*args         as *const f64);
-    let min = std::ptr::read(*args.add(1)  as *const f64);
-    let max = std::ptr::read(*args.add(2)  as *const f64);
+    let v = std::ptr::read(*args as *const f64);
+    let min = std::ptr::read(*args.add(1) as *const f64);
+    let max = std::ptr::read(*args.add(2) as *const f64);
     std::ptr::write(ret as *mut f64, v.clamp(min, max));
 }
 unsafe extern "C" fn shim_print_string(_args: *const *const u8, _ret: *mut u8) {}
@@ -86,18 +89,21 @@ unsafe extern "C" fn shim_assert_false(args: *const *const u8, _ret: *mut u8) {
     assert!(!cond, "assert_false failed: condition was true");
 }
 unsafe extern "C" fn shim_assert_eq_int(args: *const *const u8, _ret: *mut u8) {
-    let actual   = std::ptr::read(*args        as *const i64);
+    let actual = std::ptr::read(*args as *const i64);
     let expected = std::ptr::read(*args.add(1) as *const i64);
     assert_eq!(actual, expected, "assert_eq_int failed");
 }
 unsafe extern "C" fn shim_assert_eq_float(args: *const *const u8, _ret: *mut u8) {
-    let actual   = std::ptr::read(*args        as *const f64);
+    let actual = std::ptr::read(*args as *const f64);
     let expected = std::ptr::read(*args.add(1) as *const f64);
-    let eps      = std::ptr::read(*args.add(2) as *const f64);
+    let eps = std::ptr::read(*args.add(2) as *const f64);
     assert!(
         (actual - expected).abs() < eps,
         "assert_eq_float failed: |{} - {}| = {} >= eps {}",
-        actual, expected, (actual - expected).abs(), eps
+        actual,
+        expected,
+        (actual - expected).abs(),
+        eps
     );
 }
 
@@ -105,23 +111,26 @@ unsafe extern "C" fn shim_assert_eq_float(args: *const *const u8, _ret: *mut u8)
 
 fn prepare_with_shims(program: &mut BpProgram) {
     for instr in &mut program.instructions {
-        if let Instruction::Call { fn_ptr, node_type, .. } = instr {
+        if let Instruction::Call {
+            fn_ptr, node_type, ..
+        } = instr
+        {
             *fn_ptr = match node_type.as_str() {
-                "add"             => shim_add             as u64,
-                "subtract"        => shim_subtract        as u64,
-                "multiply"        => shim_multiply        as u64,
-                "divide"          => shim_divide          as u64,
-                "modulo"          => shim_modulo          as u64,
-                "greater_than"    => shim_greater_than    as u64,
-                "less_than"       => shim_less_than       as u64,
-                "abs"             => shim_abs             as u64,
-                "sqrt"            => shim_sqrt            as u64,
-                "lerp"            => shim_lerp            as u64,
-                "clamp"           => shim_clamp           as u64,
-                "print_string"    => shim_print_string    as u64,
-                "assert_true"     => shim_assert_true     as u64,
-                "assert_false"    => shim_assert_false    as u64,
-                "assert_eq_int"   => shim_assert_eq_int   as u64,
+                "add" => shim_add as u64,
+                "subtract" => shim_subtract as u64,
+                "multiply" => shim_multiply as u64,
+                "divide" => shim_divide as u64,
+                "modulo" => shim_modulo as u64,
+                "greater_than" => shim_greater_than as u64,
+                "less_than" => shim_less_than as u64,
+                "abs" => shim_abs as u64,
+                "sqrt" => shim_sqrt as u64,
+                "lerp" => shim_lerp as u64,
+                "clamp" => shim_clamp as u64,
+                "print_string" => shim_print_string as u64,
+                "assert_true" => shim_assert_true as u64,
+                "assert_false" => shim_assert_false as u64,
+                "assert_eq_int" => shim_assert_eq_int as u64,
                 "assert_eq_float" => shim_assert_eq_float as u64,
                 other => panic!("no shim for: {}", other),
             };
@@ -136,24 +145,57 @@ fn run(program: &mut BpProgram) {
 
 fn compile_and_run(graph: &GraphDescription) {
     let mut programs = compile_graph_to_bytecode(graph).expect("compile failed");
-    for prog in &mut programs { run(prog); }
+    for prog in &mut programs {
+        run(prog);
+    }
 }
 
 // ── Graph builders ────────────────────────────────────────────────────────────
 
 fn begin(pin: &str) -> NodeInstance {
     let mut n = NodeInstance::new("begin", "begin_play", Position { x: 0.0, y: 0.0 });
-    n.outputs.push(PinInstance::new(pin, Pin::new(pin, "Body", DataType::Exec, PinType::Output)));
+    n.outputs.push(PinInstance::new(
+        pin,
+        Pin::new(pin, "Body", DataType::Exec, PinType::Output),
+    ));
     n
 }
 
 fn add_node(id: &str, ca: Option<f64>, cb: Option<f64>) -> NodeInstance {
     let mut n = NodeInstance::new(id, "add", Position { x: 100.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "a", DataType::typed("i64"), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_b"), Pin::new(&format!("{id}_b"), "b", DataType::typed("i64"), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::typed("i64"), PinType::Output)));
-    if let Some(v) = ca { n.properties.insert(format!("{id}_a"), serde_json::json!(v)); }
-    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), serde_json::json!(v)); }
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_a"),
+        Pin::new(
+            &format!("{id}_a"),
+            "a",
+            DataType::typed("i64"),
+            PinType::Input,
+        ),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_b"),
+        Pin::new(
+            &format!("{id}_b"),
+            "b",
+            DataType::typed("i64"),
+            PinType::Input,
+        ),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_r"),
+        Pin::new(
+            &format!("{id}_r"),
+            "result",
+            DataType::typed("i64"),
+            PinType::Output,
+        ),
+    ));
+    if let Some(v) = ca {
+        n.properties.insert(format!("{id}_a"), serde_json::json!(v));
+    }
+    if let Some(v) = cb {
+        n.properties.insert(format!("{id}_b"), serde_json::json!(v));
+    }
     n
 }
 
@@ -195,77 +237,267 @@ fn get_bit_node(id: &str, value: i64, bit_index: i64) -> NodeInstance {
 
 fn mul_node(id: &str, ca: Option<f64>, cb: Option<f64>) -> NodeInstance {
     let mut n = NodeInstance::new(id, "multiply", Position { x: 100.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "a", DataType::typed("i64"), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_b"), Pin::new(&format!("{id}_b"), "b", DataType::typed("i64"), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::typed("i64"), PinType::Output)));
-    if let Some(v) = ca { n.properties.insert(format!("{id}_a"), serde_json::json!(v)); }
-    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), serde_json::json!(v)); }
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_a"),
+        Pin::new(
+            &format!("{id}_a"),
+            "a",
+            DataType::typed("i64"),
+            PinType::Input,
+        ),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_b"),
+        Pin::new(
+            &format!("{id}_b"),
+            "b",
+            DataType::typed("i64"),
+            PinType::Input,
+        ),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_r"),
+        Pin::new(
+            &format!("{id}_r"),
+            "result",
+            DataType::typed("i64"),
+            PinType::Output,
+        ),
+    ));
+    if let Some(v) = ca {
+        n.properties.insert(format!("{id}_a"), serde_json::json!(v));
+    }
+    if let Some(v) = cb {
+        n.properties.insert(format!("{id}_b"), serde_json::json!(v));
+    }
     n
 }
 
 fn gt_node(id: &str, cb: Option<f64>) -> NodeInstance {
     let mut n = NodeInstance::new(id, "greater_than", Position { x: 200.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "a", DataType::typed("f64"), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_b"), Pin::new(&format!("{id}_b"), "b", DataType::typed("f64"), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::typed("bool"), PinType::Output)));
-    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), serde_json::json!(v)); }
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_a"),
+        Pin::new(
+            &format!("{id}_a"),
+            "a",
+            DataType::typed("f64"),
+            PinType::Input,
+        ),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_b"),
+        Pin::new(
+            &format!("{id}_b"),
+            "b",
+            DataType::typed("f64"),
+            PinType::Input,
+        ),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_r"),
+        Pin::new(
+            &format!("{id}_r"),
+            "result",
+            DataType::typed("bool"),
+            PinType::Output,
+        ),
+    ));
+    if let Some(v) = cb {
+        n.properties.insert(format!("{id}_b"), serde_json::json!(v));
+    }
     n
 }
 
 fn branch_node(id: &str) -> NodeInstance {
     let mut n = NodeInstance::new(id, "branch", Position { x: 300.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec",      DataType::Exec, PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_c"), Pin::new(&format!("{id}_c"), "condition", DataType::typed("bool"), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_t"), Pin::new(&format!("{id}_t"), "True",  DataType::Exec, PinType::Output)));
-    n.outputs.push(PinInstance::new(&format!("{id}_f"), Pin::new(&format!("{id}_f"), "False", DataType::Exec, PinType::Output)));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_e"),
+        Pin::new(&format!("{id}_e"), "exec", DataType::Exec, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_c"),
+        Pin::new(
+            &format!("{id}_c"),
+            "condition",
+            DataType::typed("bool"),
+            PinType::Input,
+        ),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_t"),
+        Pin::new(&format!("{id}_t"), "True", DataType::Exec, PinType::Output),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_f"),
+        Pin::new(&format!("{id}_f"), "False", DataType::Exec, PinType::Output),
+    ));
     n
 }
 
 fn getter_node(id: &str, var_name: &str) -> NodeInstance {
-    let mut n = NodeInstance::new(id, &format!("get_{}", var_name), Position { x: 100.0, y: 0.0 });
-    n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::typed("i64"), PinType::Output)));
+    let mut n = NodeInstance::new(
+        id,
+        &format!("get_{}", var_name),
+        Position { x: 100.0, y: 0.0 },
+    );
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_r"),
+        Pin::new(
+            &format!("{id}_r"),
+            "result",
+            DataType::typed("i64"),
+            PinType::Output,
+        ),
+    ));
     n
 }
 
 fn assert_eq_int_node(id: &str, expected: i64) -> NodeInstance {
     let mut n = NodeInstance::new(id, "assert_eq_int", Position { x: 400.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec",     DataType::Exec, PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "actual",   DataType::typed("i64"), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_x"), Pin::new(&format!("{id}_x"), "expected", DataType::typed("i64"), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_o"), Pin::new(&format!("{id}_o"), "exec", DataType::Exec, PinType::Output)));
-    n.properties.insert(format!("{id}_x"), serde_json::json!(expected as f64));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_e"),
+        Pin::new(&format!("{id}_e"), "exec", DataType::Exec, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_a"),
+        Pin::new(
+            &format!("{id}_a"),
+            "actual",
+            DataType::typed("i64"),
+            PinType::Input,
+        ),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_x"),
+        Pin::new(
+            &format!("{id}_x"),
+            "expected",
+            DataType::typed("i64"),
+            PinType::Input,
+        ),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_o"),
+        Pin::new(&format!("{id}_o"), "exec", DataType::Exec, PinType::Output),
+    ));
+    n.properties
+        .insert(format!("{id}_x"), serde_json::json!(expected as f64));
     n
 }
 
 fn assert_eq_float_node(id: &str, expected: f64, epsilon: f64) -> NodeInstance {
     let mut n = NodeInstance::new(id, "assert_eq_float", Position { x: 400.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_e"),  Pin::new(&format!("{id}_e"),  "exec",     DataType::Exec, PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_a"),  Pin::new(&format!("{id}_a"),  "actual",   DataType::typed("f64"), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_x"),  Pin::new(&format!("{id}_x"),  "expected", DataType::typed("f64"), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_ep"), Pin::new(&format!("{id}_ep"), "epsilon",  DataType::typed("f64"), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_o"),  Pin::new(&format!("{id}_o"), "exec", DataType::Exec, PinType::Output)));
-    n.properties.insert(format!("{id}_x"),  serde_json::json!(expected));
-    n.properties.insert(format!("{id}_ep"), serde_json::json!(epsilon));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_e"),
+        Pin::new(&format!("{id}_e"), "exec", DataType::Exec, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_a"),
+        Pin::new(
+            &format!("{id}_a"),
+            "actual",
+            DataType::typed("f64"),
+            PinType::Input,
+        ),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_x"),
+        Pin::new(
+            &format!("{id}_x"),
+            "expected",
+            DataType::typed("f64"),
+            PinType::Input,
+        ),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_ep"),
+        Pin::new(
+            &format!("{id}_ep"),
+            "epsilon",
+            DataType::typed("f64"),
+            PinType::Input,
+        ),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_o"),
+        Pin::new(&format!("{id}_o"), "exec", DataType::Exec, PinType::Output),
+    ));
+    n.properties
+        .insert(format!("{id}_x"), serde_json::json!(expected));
+    n.properties
+        .insert(format!("{id}_ep"), serde_json::json!(epsilon));
     n
 }
 
 fn assert_true_node(id: &str) -> NodeInstance {
     let mut n = NodeInstance::new(id, "assert_true", Position { x: 400.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_e"), Pin::new(&format!("{id}_e"), "exec",      DataType::Exec, PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_c"), Pin::new(&format!("{id}_c"), "condition", DataType::typed("bool"), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_o"), Pin::new(&format!("{id}_o"), "exec", DataType::Exec, PinType::Output)));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_e"),
+        Pin::new(&format!("{id}_e"), "exec", DataType::Exec, PinType::Input),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_c"),
+        Pin::new(
+            &format!("{id}_c"),
+            "condition",
+            DataType::typed("bool"),
+            PinType::Input,
+        ),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_o"),
+        Pin::new(&format!("{id}_o"), "exec", DataType::Exec, PinType::Output),
+    ));
     n
 }
 
 fn lerp_node(id: &str, ca: Option<f64>, cb: Option<f64>, ct: Option<f64>) -> NodeInstance {
     let mut n = NodeInstance::new(id, "lerp", Position { x: 100.0, y: 0.0 });
-    n.inputs.push(PinInstance::new(&format!("{id}_a"), Pin::new(&format!("{id}_a"), "a", DataType::typed("f64"), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_b"), Pin::new(&format!("{id}_b"), "b", DataType::typed("f64"), PinType::Input)));
-    n.inputs.push(PinInstance::new(&format!("{id}_t"), Pin::new(&format!("{id}_t"), "t", DataType::typed("f64"), PinType::Input)));
-    n.outputs.push(PinInstance::new(&format!("{id}_r"), Pin::new(&format!("{id}_r"), "result", DataType::typed("f64"), PinType::Output)));
-    if let Some(v) = ca { n.properties.insert(format!("{id}_a"), serde_json::json!(v)); }
-    if let Some(v) = cb { n.properties.insert(format!("{id}_b"), serde_json::json!(v)); }
-    if let Some(v) = ct { n.properties.insert(format!("{id}_t"), serde_json::json!(v)); }
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_a"),
+        Pin::new(
+            &format!("{id}_a"),
+            "a",
+            DataType::typed("f64"),
+            PinType::Input,
+        ),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_b"),
+        Pin::new(
+            &format!("{id}_b"),
+            "b",
+            DataType::typed("f64"),
+            PinType::Input,
+        ),
+    ));
+    n.inputs.push(PinInstance::new(
+        &format!("{id}_t"),
+        Pin::new(
+            &format!("{id}_t"),
+            "t",
+            DataType::typed("f64"),
+            PinType::Input,
+        ),
+    ));
+    n.outputs.push(PinInstance::new(
+        &format!("{id}_r"),
+        Pin::new(
+            &format!("{id}_r"),
+            "result",
+            DataType::typed("f64"),
+            PinType::Output,
+        ),
+    ));
+    if let Some(v) = ca {
+        n.properties.insert(format!("{id}_a"), serde_json::json!(v));
+    }
+    if let Some(v) = cb {
+        n.properties.insert(format!("{id}_b"), serde_json::json!(v));
+    }
+    if let Some(v) = ct {
+        n.properties.insert(format!("{id}_t"), serde_json::json!(v));
+    }
     n
 }
 
@@ -291,7 +523,9 @@ fn test_init_bytes_emitted_for_integer_constant() {
     g.add_connection(data("a", "a_r", "chk", "chk_a"));
 
     let programs = compile_graph_to_bytecode(&g).unwrap();
-    let has_init = programs[0].instructions.iter()
+    let has_init = programs[0]
+        .instructions
+        .iter()
         .any(|i| matches!(i, Instruction::InitBytes { .. }));
     assert!(has_init, "should emit InitBytes for integer constants");
 }
@@ -306,7 +540,9 @@ fn test_init_bytes_emitted_for_float_constant() {
     g.add_connection(data("l", "l_r", "chk", "chk_a"));
 
     let programs = compile_graph_to_bytecode(&g).unwrap();
-    let has_init = programs[0].instructions.iter()
+    let has_init = programs[0]
+        .instructions
+        .iter()
         .any(|i| matches!(i, Instruction::InitBytes { .. }));
     assert!(has_init, "should emit InitBytes for float constants");
 }
@@ -321,7 +557,10 @@ fn test_branch_emits_jumpif() {
     g.add_connection(data("gt", "gt_r", "br", "br_c"));
 
     let programs = compile_graph_to_bytecode(&g).unwrap();
-    assert!(programs[0].instructions.iter().any(|i| matches!(i, Instruction::JumpIf { .. })));
+    assert!(programs[0]
+        .instructions
+        .iter()
+        .any(|i| matches!(i, Instruction::JumpIf { .. })));
 }
 
 #[test]
@@ -334,9 +573,10 @@ fn test_node_type_embedded_in_call_instruction() {
     g.add_connection(data("a", "a_r", "chk", "chk_a"));
 
     let programs = compile_graph_to_bytecode(&g).unwrap();
-    let has_add = programs[0].instructions.iter().any(|i| {
-        matches!(i, Instruction::Call { node_type, .. } if node_type == "add")
-    });
+    let has_add = programs[0]
+        .instructions
+        .iter()
+        .any(|i| matches!(i, Instruction::Call { node_type, .. } if node_type == "add"));
     assert!(has_add, "should have a Call with node_type='add'");
 }
 
@@ -476,7 +716,8 @@ fn test_correct_branch_true_fires_assert_true() {
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
     let mut gt = gt_node("gt", Some(5.0));
-    gt.properties.insert("gt_a".to_string(), serde_json::json!(10.0));
+    gt.properties
+        .insert("gt_a".to_string(), serde_json::json!(10.0));
     g.add_node(gt);
     g.add_node(branch_node("br"));
     g.add_node(assert_true_node("at"));
@@ -493,7 +734,8 @@ fn test_correct_branch_false_path_not_taken_for_true_condition() {
     let mut g = GraphDescription::new("t");
     g.add_node(begin("be"));
     let mut gt = gt_node("gt", Some(0.0));
-    gt.properties.insert("gt_a".to_string(), serde_json::json!(10.0));
+    gt.properties
+        .insert("gt_a".to_string(), serde_json::json!(10.0));
     g.add_node(gt);
     g.add_node(branch_node("br"));
     g.add_node(assert_true_node("at"));
@@ -587,8 +829,11 @@ fn test_timing_vm_execute_1000_times() {
     for _ in 0..1_000 {
         pbgc::vm::run(&programs[0]).unwrap();
     }
-    println!("[timing] 1000 × 10-node VM: {:?} ({:.2}µs/run)",
-        t.elapsed(), t.elapsed().as_micros() as f64 / 1000.0);
+    println!(
+        "[timing] 1000 × 10-node VM: {:?} ({:.2}µs/run)",
+        t.elapsed(),
+        t.elapsed().as_micros() as f64 / 1000.0
+    );
 }
 
 // ── Cycle detection ──────────────────────────────────────────────────────────
@@ -614,8 +859,8 @@ fn pure_dependency_cycle_detected() {
     assert!(result.is_err(), "expected cyclic dependency error");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, GraphyError::CyclicDependency) ||
-        matches!(&err, GraphyError::Custom(msg) if msg.contains("Cyclic dependency")),
+        matches!(err, GraphyError::CyclicDependency)
+            || matches!(&err, GraphyError::Custom(msg) if msg.contains("Cyclic dependency")),
         "expected cycle error, got {:?}",
         err
     );
@@ -642,8 +887,8 @@ fn getter_with_multiple_consumers_emits_once() {
     // Connect both pure nodes through chained add to assert
     g.add_connection(data("a", "a_r", "chk", "chk_a"));
 
-    let programs = compile_graph_to_bytecode_with_variables(&g, vars)
-        .expect("compile with variables");
+    let programs =
+        compile_graph_to_bytecode_with_variables(&g, vars).expect("compile with variables");
     let loadvar_count = programs[0]
         .instructions
         .iter()
@@ -656,12 +901,9 @@ fn getter_with_multiple_consumers_emits_once() {
     );
 }
 
-
 // ── Component ops (comp_get_prop / comp_set_prop / comp_call) ────────────────
 
-use pbgc::bytecode::comp_ops::{
-    decode_name_blob, json_blob_len, CompOpKind, ComponentOpRef,
-};
+use pbgc::bytecode::comp_ops::{decode_name_blob, json_blob_len, CompOpKind, ComponentOpRef};
 use pbgc::bytecode::TypeSlot;
 use pbgc::compile_graph_to_bytecode_full;
 use std::cell::RefCell;
@@ -676,11 +918,21 @@ fn comp_get_node(id: &str, class: &str, prop: &str) -> NodeInstance {
     // pin (#654); unconnected means self-targeted.
     n.inputs.push(PinInstance::new(
         "component_ref",
-        Pin::new("component_ref", "component", DataType::typed("ComponentRef"), PinType::Input),
+        Pin::new(
+            "component_ref",
+            "component",
+            DataType::typed("ComponentRef"),
+            PinType::Input,
+        ),
     ));
     n.outputs.push(PinInstance::new(
         &format!("{id}_r"),
-        Pin::new(&format!("{id}_r"), "value", DataType::typed("f64"), PinType::Output),
+        Pin::new(
+            &format!("{id}_r"),
+            "value",
+            DataType::typed("f64"),
+            PinType::Output,
+        ),
     ));
     n
 }
@@ -697,11 +949,21 @@ fn comp_set_node(id: &str, class: &str, prop: &str, value: Option<f64>) -> NodeI
     ));
     n.inputs.push(PinInstance::new(
         "component_ref",
-        Pin::new("component_ref", "component", DataType::typed("ComponentRef"), PinType::Input),
+        Pin::new(
+            "component_ref",
+            "component",
+            DataType::typed("ComponentRef"),
+            PinType::Input,
+        ),
     ));
     n.inputs.push(PinInstance::new(
         &format!("{id}_v"),
-        Pin::new(&format!("{id}_v"), "value", DataType::typed("f64"), PinType::Input),
+        Pin::new(
+            &format!("{id}_v"),
+            "value",
+            DataType::typed("f64"),
+            PinType::Input,
+        ),
     ));
     n.outputs.push(PinInstance::new(
         &format!("{id}_o"),
@@ -725,7 +987,12 @@ fn comp_call_node(id: &str, class: &str, method: &str, with_return: bool) -> Nod
     ));
     n.inputs.push(PinInstance::new(
         "component_ref",
-        Pin::new("component_ref", "component", DataType::typed("ComponentRef"), PinType::Input),
+        Pin::new(
+            "component_ref",
+            "component",
+            DataType::typed("ComponentRef"),
+            PinType::Input,
+        ),
     ));
     n.outputs.push(PinInstance::new(
         &format!("{id}_o"),
@@ -734,7 +1001,12 @@ fn comp_call_node(id: &str, class: &str, method: &str, with_return: bool) -> Nod
     if with_return {
         n.outputs.push(PinInstance::new(
             &format!("{id}_r"),
-            Pin::new(&format!("{id}_r"), "result", DataType::typed("f64"), PinType::Output),
+            Pin::new(
+                &format!("{id}_r"),
+                "result",
+                DataType::typed("f64"),
+                PinType::Output,
+            ),
         ));
     }
     n
@@ -786,13 +1058,20 @@ fn comp_get_feeding_comp_set_compiles_as_blob_chain() {
     let prog = &compiled.programs[0];
     // The set's value input resolves to the get's reserved output slot.
     let get_out = prog.instructions.iter().find_map(|i| match i {
-        Instruction::Call { node_type, output_offset, has_output: true, .. }
-            if node_type == "comp_get_prop::Light::intensity" => Some(*output_offset),
+        Instruction::Call {
+            node_type,
+            output_offset,
+            has_output: true,
+            ..
+        } if node_type == "comp_get_prop::Light::intensity" => Some(*output_offset),
         _ => None,
     });
     let set_in = prog.instructions.iter().find_map(|i| match i {
-        Instruction::Call { node_type, input_offsets, .. }
-            if node_type == "comp_set_prop::Light::intensity" => Some(input_offsets[1]),
+        Instruction::Call {
+            node_type,
+            input_offsets,
+            ..
+        } if node_type == "comp_set_prop::Light::intensity" => Some(input_offsets[1]),
         _ => None,
     });
     assert_eq!(get_out, set_in, "get output slot feeds set value input");
@@ -806,11 +1085,13 @@ fn comp_call_without_return_has_no_output_slot() {
     g.add_connection(exec("begin", "be", "call", "call_e"));
 
     let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
-    let has_output = compiled.programs[0].instructions.iter().any(|i| matches!(
-        i,
-        Instruction::Call { node_type, has_output: true, .. }
-            if node_type == "comp_call::Door::open"
-    ));
+    let has_output = compiled.programs[0].instructions.iter().any(|i| {
+        matches!(
+            i,
+            Instruction::Call { node_type, has_output: true, .. }
+                if node_type == "comp_call::Door::open"
+        )
+    });
     assert!(!has_output, "void call must not reserve an output slot");
 }
 
@@ -843,8 +1124,10 @@ unsafe fn log_op(kind: &str, name_ptr: *const u8, value_ptr: Option<*const u8>) 
         String::from_utf8_lossy(bytes).into_owned()
     });
     COMP_OPS_LOG.with(|log| {
-        log.borrow_mut()
-            .push(format!("{kind}:{class}:{member}:{}", value.unwrap_or_default()))
+        log.borrow_mut().push(format!(
+            "{kind}:{class}:{member}:{}",
+            value.unwrap_or_default()
+        ))
     });
 }
 
@@ -866,7 +1149,10 @@ unsafe extern "C" fn stub_comp_call(args: *const *const u8, ret: *mut u8, _ts: *
 
 fn prepare_comp_shims(program: &mut BpProgram) {
     for instr in &mut program.instructions {
-        if let Instruction::Call { fn_ptr, node_type, .. } = instr {
+        if let Instruction::Call {
+            fn_ptr, node_type, ..
+        } = instr
+        {
             if node_type.starts_with("comp_get_prop::") {
                 *fn_ptr = stub_comp_get as u64;
             } else if node_type.starts_with("comp_set_prop::") {
@@ -924,10 +1210,13 @@ fn comp_get_result_flows_into_set_through_arena() {
     }
 
     let log = COMP_OPS_LOG.with(|log| log.borrow().clone());
-    assert_eq!(log, vec![
-        "get:Light:intensity:".to_string(),
-        "set:Light:intensity:42.5".to_string(),
-    ]);
+    assert_eq!(
+        log,
+        vec![
+            "get:Light:intensity:".to_string(),
+            "set:Light:intensity:42.5".to_string(),
+        ]
+    );
 }
 
 // ── Rust-source emission (#651) ───────────────────────────────────────────────
@@ -1006,12 +1295,22 @@ fn get_ref_node(id: &str, class: &str, index: u32, with_actor_pin: bool) -> Node
     if with_actor_pin {
         n.inputs.push(PinInstance::new(
             "actor",
-            Pin::new("actor", "actor", DataType::typed("ActorRef"), PinType::Input),
+            Pin::new(
+                "actor",
+                "actor",
+                DataType::typed("ActorRef"),
+                PinType::Input,
+            ),
         ));
     }
     n.outputs.push(PinInstance::new(
         &format!("{id}_r"),
-        Pin::new(&format!("{id}_r"), "component", DataType::typed("ComponentRef"), PinType::Output),
+        Pin::new(
+            &format!("{id}_r"),
+            "component",
+            DataType::typed("ComponentRef"),
+            PinType::Output,
+        ),
     ));
     n
 }
@@ -1021,13 +1320,24 @@ fn find_node(id: &str, needle: &str) -> NodeInstance {
     let mut n = NodeInstance::new(id, "find_object_by_name", Position { x: 25.0, y: 0.0 });
     n.inputs.push(PinInstance::new(
         &format!("{id}_n"),
-        Pin::new(&format!("{id}_n"), "name", DataType::typed("String"), PinType::Input),
+        Pin::new(
+            &format!("{id}_n"),
+            "name",
+            DataType::typed("String"),
+            PinType::Input,
+        ),
     ));
     n.outputs.push(PinInstance::new(
         &format!("{id}_r"),
-        Pin::new(&format!("{id}_r"), "actor", DataType::typed("ActorRef"), PinType::Output),
+        Pin::new(
+            &format!("{id}_r"),
+            "actor",
+            DataType::typed("ActorRef"),
+            PinType::Output,
+        ),
     ));
-    n.properties.insert(format!("{id}_n"), serde_json::json!(needle));
+    n.properties
+        .insert(format!("{id}_n"), serde_json::json!(needle));
     n
 }
 
@@ -1045,11 +1355,11 @@ fn pin_targeted_comp_set_stages_reference_operand() {
     let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
     let prog = &compiled.programs[0];
     let call = prog.instructions.iter().find_map(|i| match i {
-        Instruction::Call { node_type, input_offsets, .. }
-            if node_type == "comp_set_prop::Light::intensity" =>
-        {
-            Some(input_offsets.clone())
-        }
+        Instruction::Call {
+            node_type,
+            input_offsets,
+            ..
+        } if node_type == "comp_set_prop::Light::intensity" => Some(input_offsets.clone()),
         _ => None,
     });
     let input_offsets = call.expect("pin-targeted set must compile to a Call");
@@ -1063,13 +1373,16 @@ fn pin_targeted_comp_set_stages_reference_operand() {
         }
         _ => None,
     });
-    let fields =
-        decode_targeted_name_blob(&blob.expect("name blob staged")).expect("decodes");
+    let fields = decode_targeted_name_blob(&blob.expect("name blob staged")).expect("decodes");
     assert_eq!(fields.target, pbgc::bytecode::comp_ops::RefTarget::RefPin);
     assert_eq!(
         compiled.components,
         vec![
-            ComponentOpRef { kind: CompOpKind::GetRef, class_name: "Light".into(), member: "0".into() },
+            ComponentOpRef {
+                kind: CompOpKind::GetRef,
+                class_name: "Light".into(),
+                member: "0".into()
+            },
             ComponentOpRef {
                 kind: CompOpKind::SetProp,
                 class_name: "Light".into(),
@@ -1117,22 +1430,22 @@ fn cross_object_chain_compiles_as_identity_producers() {
     // The get op is pin-targeted (ref wired into its component_ref pin):
     // name + reference operand.
     let get_inputs = prog.instructions.iter().find_map(|i| match i {
-        Instruction::Call { node_type, input_offsets, .. }
-            if node_type == "comp_get_prop::Light::intensity" =>
-        {
-            Some(input_offsets.len())
-        }
+        Instruction::Call {
+            node_type,
+            input_offsets,
+            ..
+        } if node_type == "comp_get_prop::Light::intensity" => Some(input_offsets.len()),
         _ => None,
     });
     assert_eq!(get_inputs, Some(2));
     // The set stays self-targeted (its own component_ref pin unconnected):
     // legacy name + value shape.
     let set_inputs = prog.instructions.iter().find_map(|i| match i {
-        Instruction::Call { node_type, input_offsets, .. }
-            if node_type == "comp_set_prop::Light::intensity" =>
-        {
-            Some(input_offsets.len())
-        }
+        Instruction::Call {
+            node_type,
+            input_offsets,
+            ..
+        } if node_type == "comp_set_prop::Light::intensity" => Some(input_offsets.len()),
         _ => None,
     });
     assert_eq!(set_inputs, Some(2));
@@ -1181,7 +1494,12 @@ fn rust_emission_routes_references_through_script_refs() {
     let mut literal = NodeInstance::new("lit", "object_ref_literal", Position { x: 10.0, y: 0.0 });
     literal.outputs.push(PinInstance::new(
         "lit_r",
-        Pin::new("lit_r", "component", DataType::typed("ComponentRef"), PinType::Output),
+        Pin::new(
+            "lit_r",
+            "component",
+            DataType::typed("ComponentRef"),
+            PinType::Output,
+        ),
     ));
     literal
         .properties
@@ -1221,22 +1539,28 @@ fn unconnected_pins_carry_explicit_self_target() {
 
     let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
     let prog = &compiled.programs[0];
-    let inputs = prog.instructions.iter().find_map(|i| match i {
-        Instruction::Call { node_type, input_offsets, .. }
-            if node_type == "comp_set_prop::Light::intensity" =>
-        {
-            Some(input_offsets.clone())
-        }
-        _ => None,
-    })
-    .expect("set compiles");
+    let inputs = prog
+        .instructions
+        .iter()
+        .find_map(|i| match i {
+            Instruction::Call {
+                node_type,
+                input_offsets,
+                ..
+            } if node_type == "comp_set_prop::Light::intensity" => Some(input_offsets.clone()),
+            _ => None,
+        })
+        .expect("set compiles");
     assert_eq!(inputs.len(), 2, "self-targeted: name + value only");
     let blob = prog.instructions.iter().find_map(|i| match i {
         Instruction::InitBytes { offset, bytes } if *offset == inputs[0] => Some(bytes.clone()),
         _ => None,
     });
     let fields = decode_targeted_name_blob(blob.as_deref().unwrap()).expect("decodes");
-    assert_eq!(fields.target, pbgc::bytecode::comp_ops::RefTarget::SelfActor);
+    assert_eq!(
+        fields.target,
+        pbgc::bytecode::comp_ops::RefTarget::SelfActor
+    );
     // The staged bytes really do end with the `self` field.
     let blob = blob.unwrap();
     assert!(blob.ends_with(b"self\0"));
@@ -1255,13 +1579,18 @@ fn pin_targeted_call_stages_argc_and_target() {
 
     let compiled = compile_graph_to_bytecode_full(&g, Default::default()).unwrap();
     let prog = &compiled.programs[0];
-    let inputs = prog.instructions.iter().find_map(|i| match i {
-        Instruction::Call { node_type, input_offsets, .. } if node_type == "comp_call::Door::open" => {
-            Some(input_offsets.clone())
-        }
-        _ => None,
-    })
-    .expect("call compiles");
+    let inputs = prog
+        .instructions
+        .iter()
+        .find_map(|i| match i {
+            Instruction::Call {
+                node_type,
+                input_offsets,
+                ..
+            } if node_type == "comp_call::Door::open" => Some(input_offsets.clone()),
+            _ => None,
+        })
+        .expect("call compiles");
     // name + reference operand (no method args on this node).
     assert_eq!(inputs.len(), 2);
     let blob = prog.instructions.iter().find_map(|i| match i {

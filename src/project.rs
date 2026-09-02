@@ -298,8 +298,7 @@ pub fn generate_blueprint_actor_source_with_components(
     compiled_source: &str,
     components: Vec<CompiledComponent>,
 ) -> String {
-    let bp = CompiledBlueprint::new(blueprint_name, compiled_source)
-        .with_components(components);
+    let bp = CompiledBlueprint::new(blueprint_name, compiled_source).with_components(components);
     gen_blueprint_actor(&bp)
 }
 
@@ -364,8 +363,8 @@ fn gen_blueprint_actor(bp: &CompiledBlueprint) -> String {
     let has_components = !enabled_components.is_empty();
 
     // ── Set up custom events ──────────────────────────────────────────────────
-    let has_custom_events = bp.source.contains("on_player_died")
-        || bp.source.contains("emit_event");
+    let has_custom_events =
+        bp.source.contains("on_player_died") || bp.source.contains("emit_event");
     let event_helpers = if has_custom_events {
         format!(
             r#"
@@ -637,8 +636,20 @@ fn default_variable_storage_block(variables: &[CompiledVariable]) -> String {
 fn is_copy_type(type_str: &str) -> bool {
     matches!(
         type_str,
-        "i32" | "i64" | "u32" | "u64" | "f32" | "f64" | "bool" | "char" |
-        "usize" | "isize" | "i8" | "i16" | "u8" | "u16"
+        "i32"
+            | "i64"
+            | "u32"
+            | "u64"
+            | "f32"
+            | "f64"
+            | "bool"
+            | "char"
+            | "usize"
+            | "isize"
+            | "i8"
+            | "i16"
+            | "u8"
+            | "u16"
     )
 }
 
@@ -710,7 +721,10 @@ mod tests {
             actor.contains("fn tick(&mut self, _entity: Entity, _world: &mut World)"),
             "emitted tick signature drifted from the pinned Actor trait"
         );
-        assert!(!actor.contains("GameTime"), "Actor::tick must stay time-free");
+        assert!(
+            !actor.contains("GameTime"),
+            "Actor::tick must stay time-free"
+        );
         assert!(
             !actor.contains("gamma_core"),
             "emitted code may only reference crates present in the pinned graph"
@@ -849,9 +863,15 @@ mod tests {
         project.write_to_dir(&dir).unwrap();
         assert!(dir.join("src/classes/mod.rs").exists());
         assert!(dir.join("src/classes/player_controller/mod.rs").exists());
-        assert!(dir.join("src/classes/player_controller/events/mod.rs").exists());
-        assert!(dir.join("src/classes/player_controller/events/events.rs").exists());
-        assert!(dir.join("src/classes/player_controller/vars/mod.rs").exists());
+        assert!(dir
+            .join("src/classes/player_controller/events/mod.rs")
+            .exists());
+        assert!(dir
+            .join("src/classes/player_controller/events/events.rs")
+            .exists());
+        assert!(dir
+            .join("src/classes/player_controller/vars/mod.rs")
+            .exists());
         assert!(dir.join("src/classes/enemy_ai/mod.rs").exists());
         assert!(dir.join("src/classes/enemy_ai/events/mod.rs").exists());
         assert!(dir.join("src/classes/enemy_ai/events/events.rs").exists());

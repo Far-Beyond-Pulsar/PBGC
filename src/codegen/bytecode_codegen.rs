@@ -356,16 +356,12 @@ impl<'a> BytecodeCodegen<'a> {
     }
 
     fn emit_custom_event_dispatch(&mut self, node: &NodeInstance) -> Result<(), GraphyError> {
-        let event_uid = node
-            .properties
-            .get("event_uid")
-            .cloned()
-            .ok_or_else(|| {
-                GraphyError::Custom(format!(
-                    "emit_custom_event node '{}' has no event_uid property",
-                    node.id
-                ))
-            })?;
+        let event_uid = node.properties.get("event_uid").cloned().ok_or_else(|| {
+            GraphyError::Custom(format!(
+                "emit_custom_event node '{}' has no event_uid property",
+                node.id
+            ))
+        })?;
 
         // Collect input offsets for all data pins (skip execution inputs)
         let data_pins: Vec<_> = node
@@ -376,12 +372,8 @@ impl<'a> BytecodeCodegen<'a> {
 
         let mut input_offsets = Vec::new();
         for pin in &data_pins {
-            let offset = self.resolve_input_offset(
-                &node.id,
-                &node.node_type,
-                &pin.id,
-                &pin.pin.name,
-            )?;
+            let offset =
+                self.resolve_input_offset(&node.id, &node.node_type, &pin.id, &pin.pin.name)?;
             input_offsets.push(offset);
         }
 
@@ -441,16 +433,14 @@ impl<'a> BytecodeCodegen<'a> {
     fn component_ref_pin_connected(&self, node: &NodeInstance) -> bool {
         use graphy::analysis::DataSource;
         matches!(
-            self.data_resolver.get_input_source(&node.id, "component_ref"),
+            self.data_resolver
+                .get_input_source(&node.id, "component_ref"),
             Some(DataSource::Connection { .. }) | Some(DataSource::Constant(_))
         )
     }
 
     /// Resolve the staged offset of a node's `component_ref` operand.
-    fn resolve_component_ref_operand(
-        &mut self,
-        node: &NodeInstance,
-    ) -> Result<usize, GraphyError> {
+    fn resolve_component_ref_operand(&mut self, node: &NodeInstance) -> Result<usize, GraphyError> {
         let pin = node
             .inputs
             .iter()
@@ -479,7 +469,8 @@ impl<'a> BytecodeCodegen<'a> {
         }
         let bytes = encode_targeted_name_blob(class_name, member, target);
         let offset = self.layout.alloc(bytes.len(), 1);
-        self.instructions.push(Instruction::InitBytes { offset, bytes });
+        self.instructions
+            .push(Instruction::InitBytes { offset, bytes });
         self.comp_name_blobs.insert(key, offset);
         Ok(offset)
     }
@@ -491,7 +482,11 @@ impl<'a> BytecodeCodegen<'a> {
         member: &str,
     ) -> Result<(), GraphyError> {
         let targeted = self.component_ref_pin_connected(node);
-        let target = if targeted { RefTarget::RefPin } else { RefTarget::SelfActor };
+        let target = if targeted {
+            RefTarget::RefPin
+        } else {
+            RefTarget::SelfActor
+        };
         let name_offset = self.stage_targeted_name_blob(class_name, member, target)?;
         let mut input_offsets = vec![name_offset];
         if targeted {
@@ -525,7 +520,8 @@ impl<'a> BytecodeCodegen<'a> {
         self.follow_exec_outputs(node)
     }
 
-    fn emit_comp_call(        &mut self,
+    fn emit_comp_call(
+        &mut self,
         node: &NodeInstance,
         class_name: &str,
         member: &str,
@@ -539,15 +535,19 @@ impl<'a> BytecodeCodegen<'a> {
             .filter(|p| p.id != "component_ref" && p.pin.name != "component")
             .count();
         let targeted = self.component_ref_pin_connected(node);
-        let target = if targeted { RefTarget::RefPin } else { RefTarget::SelfActor };
+        let target = if targeted {
+            RefTarget::RefPin
+        } else {
+            RefTarget::SelfActor
+        };
         let name_key = format!("{}\0{}\0call\0{}", class_name, member, target.as_field());
         let name_offset = match self.comp_name_blobs.get(&name_key) {
             Some(&offset) => offset,
             None => {
-                let bytes =
-                    encode_targeted_call_name_blob(class_name, member, arg_count, target);
+                let bytes = encode_targeted_call_name_blob(class_name, member, arg_count, target);
                 let offset = self.layout.alloc(bytes.len(), 1);
-                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                self.instructions
+                    .push(Instruction::InitBytes { offset, bytes });
                 self.comp_name_blobs.insert(name_key, offset);
                 offset
             }
@@ -556,7 +556,9 @@ impl<'a> BytecodeCodegen<'a> {
         if targeted {
             input_offsets.push(self.resolve_component_ref_operand(node)?);
         }
-        for pin in node.inputs.iter()
+        for pin in node
+            .inputs
+            .iter()
             .filter(|p| !matches!(p.pin.data_type, DataType::Exec))
             .filter(|p| p.id != "component_ref" && p.pin.name != "component")
         {
@@ -581,10 +583,13 @@ impl<'a> BytecodeCodegen<'a> {
             type_slot_offsets: Vec::new(),
         });
         if has_output {
-            self.output_offsets.insert(node.id.clone(), OutputSlot {
-                base_offset: output_offset,
-                field_offsets: HashMap::new(),
-            });
+            self.output_offsets.insert(
+                node.id.clone(),
+                OutputSlot {
+                    base_offset: output_offset,
+                    field_offsets: HashMap::new(),
+                },
+            );
         }
         self.record_component_ref(CompOpKind::Call, class_name, member);
         self.follow_exec_outputs(node)
@@ -602,7 +607,11 @@ impl<'a> BytecodeCodegen<'a> {
             return Ok(slot.base_offset);
         }
         let targeted = self.component_ref_pin_connected(node);
-        let target = if targeted { RefTarget::RefPin } else { RefTarget::SelfActor };
+        let target = if targeted {
+            RefTarget::RefPin
+        } else {
+            RefTarget::SelfActor
+        };
         let name_offset = self.stage_targeted_name_blob(class_name, member, target)?;
         let mut input_offsets = vec![name_offset];
         if targeted {
@@ -618,10 +627,13 @@ impl<'a> BytecodeCodegen<'a> {
             has_output: true,
             type_slot_offsets: Vec::new(),
         });
-        self.output_offsets.insert(node.id.clone(), OutputSlot {
-            base_offset: output_offset,
-            field_offsets: HashMap::new(),
-        });
+        self.output_offsets.insert(
+            node.id.clone(),
+            OutputSlot {
+                base_offset: output_offset,
+                field_offsets: HashMap::new(),
+            },
+        );
         self.record_component_ref(CompOpKind::GetProp, class_name, member);
         Ok(output_offset)
     }
@@ -641,14 +653,19 @@ impl<'a> BytecodeCodegen<'a> {
             return Ok(slot.base_offset);
         }
         let actor_pin = node.inputs.iter().find(|p| p.id == "actor");
-        let target = if actor_pin.is_some() { RefTarget::RefPin } else { RefTarget::SelfActor };
+        let target = if actor_pin.is_some() {
+            RefTarget::RefPin
+        } else {
+            RefTarget::SelfActor
+        };
         let name_key = format!("ref\0{class_name}\0{member}\0{}", target.as_field());
         let name_offset = match self.comp_name_blobs.get(&name_key) {
             Some(&offset) => offset,
             None => {
                 let bytes = encode_targeted_name_blob(class_name, member, target);
                 let offset = self.layout.alloc(bytes.len(), 1);
-                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                self.instructions
+                    .push(Instruction::InitBytes { offset, bytes });
                 self.comp_name_blobs.insert(name_key, offset);
                 offset
             }
@@ -667,10 +684,13 @@ impl<'a> BytecodeCodegen<'a> {
             has_output: true,
             type_slot_offsets: Vec::new(),
         });
-        self.output_offsets.insert(node.id.clone(), OutputSlot {
-            base_offset: output_offset,
-            field_offsets: HashMap::new(),
-        });
+        self.output_offsets.insert(
+            node.id.clone(),
+            OutputSlot {
+                base_offset: output_offset,
+                field_offsets: HashMap::new(),
+            },
+        );
         self.record_component_ref(CompOpKind::GetRef, class_name, member);
         Ok(output_offset)
     }
@@ -705,10 +725,13 @@ impl<'a> BytecodeCodegen<'a> {
             has_output: true,
             type_slot_offsets: Vec::new(),
         });
-        self.output_offsets.insert(node.id.clone(), OutputSlot {
-            base_offset: output_offset,
-            field_offsets: HashMap::new(),
-        });
+        self.output_offsets.insert(
+            node.id.clone(),
+            OutputSlot {
+                base_offset: output_offset,
+                field_offsets: HashMap::new(),
+            },
+        );
         Ok(output_offset)
     }
 
@@ -751,7 +774,8 @@ impl<'a> BytecodeCodegen<'a> {
             });
             let bytes = encode_json_blob(&literal.to_string());
             let offset = self.layout.alloc(bytes.len(), 8);
-            self.instructions.push(Instruction::InitBytes { offset, bytes });
+            self.instructions
+                .push(Instruction::InitBytes { offset, bytes });
             return Ok(offset);
         }
 
@@ -759,22 +783,28 @@ impl<'a> BytecodeCodegen<'a> {
             Some(DataSource::Constant(value)) => {
                 let bytes = encode_json_blob(&value.to_string());
                 let offset = self.layout.alloc(bytes.len(), 8);
-                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                self.instructions
+                    .push(Instruction::InitBytes { offset, bytes });
                 Ok(offset)
             }
-            Some(DataSource::Connection { source_node_id, source_pin }) => {
+            Some(DataSource::Connection {
+                source_node_id,
+                source_pin,
+            }) => {
                 self.ensure_connected_output(source_node_id)?;
-                self.output_offset_for(source_node_id, source_pin).ok_or_else(|| {
-                    GraphyError::Custom(format!(
-                        "No arena offset for output '{}.{}'",
-                        source_node_id, source_pin
-                    ))
-                })
+                self.output_offset_for(source_node_id, source_pin)
+                    .ok_or_else(|| {
+                        GraphyError::Custom(format!(
+                            "No arena offset for output '{}.{}'",
+                            source_node_id, source_pin
+                        ))
+                    })
             }
             Some(DataSource::Default) => {
                 let bytes = encode_json_blob("\"\"");
                 let offset = self.layout.alloc(bytes.len(), 8);
-                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                self.instructions
+                    .push(Instruction::InitBytes { offset, bytes });
                 Ok(offset)
             }
             None => Err(GraphyError::Custom(format!(
@@ -803,10 +833,14 @@ impl<'a> BytecodeCodegen<'a> {
             Some(DataSource::Constant(value)) => {
                 let bytes = encode_json_blob(&value.to_string());
                 let offset = self.layout.alloc(bytes.len(), 8);
-                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                self.instructions
+                    .push(Instruction::InitBytes { offset, bytes });
                 Ok(offset)
             }
-            Some(DataSource::Connection { source_node_id, source_pin }) => {
+            Some(DataSource::Connection {
+                source_node_id,
+                source_pin,
+            }) => {
                 let accepts = self
                     .graph
                     .nodes
@@ -822,17 +856,19 @@ impl<'a> BytecodeCodegen<'a> {
                     )));
                 }
                 self.ensure_connected_output(source_node_id)?;
-                self.output_offset_for(source_node_id, source_pin).ok_or_else(|| {
-                    GraphyError::Custom(format!(
-                        "No arena offset for output '{}.{}'",
-                        source_node_id, source_pin
-                    ))
-                })
+                self.output_offset_for(source_node_id, source_pin)
+                    .ok_or_else(|| {
+                        GraphyError::Custom(format!(
+                            "No arena offset for output '{}.{}'",
+                            source_node_id, source_pin
+                        ))
+                    })
             }
             Some(DataSource::Default) => {
                 let bytes = encode_json_blob("null");
                 let offset = self.layout.alloc(bytes.len(), 8);
-                self.instructions.push(Instruction::InitBytes { offset, bytes });
+                self.instructions
+                    .push(Instruction::InitBytes { offset, bytes });
                 Ok(offset)
             }
             None => Err(GraphyError::Custom(format!(
@@ -919,10 +955,13 @@ impl<'a> BytecodeCodegen<'a> {
             output_offset,
             size: var_size,
         });
-        self.output_offsets.insert(node.id.clone(), OutputSlot {
-            base_offset: output_offset,
-            field_offsets: HashMap::new(),
-        });
+        self.output_offsets.insert(
+            node.id.clone(),
+            OutputSlot {
+                base_offset: output_offset,
+                field_offsets: HashMap::new(),
+            },
+        );
         Ok(output_offset)
     }
 
@@ -1429,12 +1468,13 @@ impl<'a> BytecodeCodegen<'a> {
                 source_pin,
             }) => {
                 self.ensure_connected_output(source_node_id)?;
-                self.output_offset_for(source_node_id, source_pin).ok_or_else(|| {
-                    GraphyError::Custom(format!(
-                        "No arena offset for output '{}.{}'",
-                        source_node_id, source_pin
-                    ))
-                })
+                self.output_offset_for(source_node_id, source_pin)
+                    .ok_or_else(|| {
+                        GraphyError::Custom(format!(
+                            "No arena offset for output '{}.{}'",
+                            source_node_id, source_pin
+                        ))
+                    })
             }
 
             Some(DataSource::Constant(val)) => {
@@ -1552,11 +1592,15 @@ impl<'a> BytecodeCodegen<'a> {
 fn is_identity_producer(kind: CompOpKind) -> bool {
     matches!(
         kind,
-        CompOpKind::GetRef | CompOpKind::FindByStableId | CompOpKind::FindByName | CompOpKind::ObjectLiteral
+        CompOpKind::GetRef
+            | CompOpKind::FindByStableId
+            | CompOpKind::FindByName
+            | CompOpKind::ObjectLiteral
     )
 }
 
-fn variable_layout_for_type(type_str: &str) -> Option<(usize, usize)> {    match type_str.trim() {
+fn variable_layout_for_type(type_str: &str) -> Option<(usize, usize)> {
+    match type_str.trim() {
         "bool" | "i8" | "u8" => Some((1, 1)),
         "i16" | "u16" => Some((2, 2)),
         "i32" | "u32" | "f32" | "char" => Some((4, 4)),

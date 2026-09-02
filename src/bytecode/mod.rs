@@ -15,14 +15,21 @@ pub type LabelId = usize;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Instruction {
     /// Copy `bytes` into the arena at `offset`. Used to initialise constant inputs.
-    InitBytes { offset: usize, bytes: Vec<u8> },
+    InitBytes {
+        offset: usize,
+        bytes: Vec<u8>,
+    },
 
     /// Store a `TypeSlot { size, align }` at `offset` inside the arena.
     ///
     /// Emitted by the codegen whenever a generic node's type parameter `T` has
     /// been resolved at graph-compile time.  The VM writes the struct into the
     /// arena; the dispatch function reads it via `type_slots[i]`.
-    InitTypeSlot { offset: usize, size: usize, align: usize },
+    InitTypeSlot {
+        offset: usize,
+        size: usize,
+        align: usize,
+    },
 
     /// Direct function call — no dispatch table, no type lookup.
     ///
@@ -35,12 +42,12 @@ pub enum Instruction {
     /// `type_slot_offsets` are arena offsets of `TypeSlot` values, one per
     /// resolved generic type parameter.  Empty for fully-concrete functions.
     Call {
-        fn_ptr:             u64,
-        node_type:          String,
-        input_offsets:      Vec<usize>,
-        output_offset:      usize,
-        has_output:         bool,
-        type_slot_offsets:  Vec<usize>,
+        fn_ptr: u64,
+        node_type: String,
+        input_offsets: Vec<usize>,
+        output_offset: usize,
+        has_output: bool,
+        type_slot_offsets: Vec<usize>,
     },
 
     /// Copy bytes from one arena slot into another.
@@ -60,8 +67,8 @@ pub enum Instruction {
     /// Branch on the bool byte at `condition_offset` (non-zero → true).
     JumpIf {
         condition_offset: usize,
-        true_label:       LabelId,
-        false_label:      LabelId,
+        true_label: LabelId,
+        false_label: LabelId,
     },
     Jump(LabelId),
     Label(LabelId),
@@ -75,22 +82,22 @@ pub enum Instruction {
 /// After preparation `pbgc::vm::run` takes only `&BpProgram`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BpProgram {
-    pub name:           String,
+    pub name: String,
     /// Total byte size of the arena required to execute this program.
-    pub arena_size:     usize,
+    pub arena_size: usize,
     /// Peak number of input-pointer arguments across all Call instructions.
     /// Used to pre-allocate the arg_ptrs scratch buffer in the VM.
     pub max_args_count: usize,
-    pub instructions:   Vec<Instruction>,
+    pub instructions: Vec<Instruction>,
 }
 
 impl BpProgram {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name:           name.into(),
-            arena_size:     0,
+            name: name.into(),
+            arena_size: 0,
             max_args_count: 0,
-            instructions:   Vec::new(),
+            instructions: Vec::new(),
         }
     }
 }

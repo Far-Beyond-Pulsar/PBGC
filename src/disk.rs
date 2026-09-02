@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::compiler::{compile_graph, compile_graph_with_variables};
-use crate::project::{CompiledBlueprint, GeneratedProject, ProjectSpec, generate_project};
+use crate::project::{generate_project, CompiledBlueprint, GeneratedProject, ProjectSpec};
 use graphy::{DataType, GraphDescription, TypeInfo};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -158,75 +158,77 @@ fn walk_for_blueprints(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[cfg(test)]
 mod tests {
-        use super::*;
-    use graphy::{DataType, GraphDescription, NodeInstance, Pin, PinInstance, PinType, Position, TypeInfo};
+    use super::*;
+    use graphy::{
+        DataType, GraphDescription, NodeInstance, Pin, PinInstance, PinType, Position, TypeInfo,
+    };
 
-        fn unique_temp_dir(prefix: &str) -> PathBuf {
-                let nanos = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos();
-                std::env::temp_dir().join(format!("{}_{}", prefix, nanos))
-        }
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{}_{}", prefix, nanos))
+    }
 
-        #[test]
-        fn compile_project_reads_blueprint_asset_variables() {
-                let root = unique_temp_dir("pbgc_disk_asset_vars");
-                let class_dir = root.join("PlayerClass");
-                std::fs::create_dir_all(&class_dir).unwrap();
+    #[test]
+    fn compile_project_reads_blueprint_asset_variables() {
+        let root = unique_temp_dir("pbgc_disk_asset_vars");
+        let class_dir = root.join("PlayerClass");
+        std::fs::create_dir_all(&class_dir).unwrap();
 
-                let mut graph = GraphDescription::new("player_graph");
-                let mut begin = NodeInstance::new("begin", "begin_play", Position { x: 0.0, y: 0.0 });
-                begin.outputs.push(PinInstance::new(
-                    "begin_exec",
-                    Pin::new("begin_exec", "Body", DataType::Exec, PinType::Output),
-                ));
-                graph.add_node(begin);
-                let graph_value = serde_json::to_value(&graph).unwrap();
-                let asset_value = serde_json::json!({
-                        "format_version": 1,
-                        "mainGraph": graph_value,
-                        "variables": [
-                                {
-                                        "id": "var_1",
-                                        "name": "health",
-                                        "data_type": graphy::DataType::typed("f64"),
-                                        "default_value": "100.0",
-                                        "description": ""
-                                }
-                        ]
-                });
+        let mut graph = GraphDescription::new("player_graph");
+        let mut begin = NodeInstance::new("begin", "begin_play", Position { x: 0.0, y: 0.0 });
+        begin.outputs.push(PinInstance::new(
+            "begin_exec",
+            Pin::new("begin_exec", "Body", DataType::Exec, PinType::Output),
+        ));
+        graph.add_node(begin);
+        let graph_value = serde_json::to_value(&graph).unwrap();
+        let asset_value = serde_json::json!({
+                "format_version": 1,
+                "mainGraph": graph_value,
+                "variables": [
+                        {
+                                "id": "var_1",
+                                "name": "health",
+                                "data_type": graphy::DataType::typed("f64"),
+                                "default_value": "100.0",
+                                "description": ""
+                        }
+                ]
+        });
 
-                std::fs::write(
-                        class_dir.join("graph_save.json"),
-                        serde_json::to_string_pretty(&asset_value).unwrap(),
-                )
-                .unwrap();
+        std::fs::write(
+            class_dir.join("graph_save.json"),
+            serde_json::to_string_pretty(&asset_value).unwrap(),
+        )
+        .unwrap();
 
-                let compiled_single = compile_blueprint_folder(&class_dir).unwrap();
-                assert_eq!(compiled_single.variables.len(), 1);
-                assert_eq!(compiled_single.variables[0].name, "health");
+        let compiled_single = compile_blueprint_folder(&class_dir).unwrap();
+        assert_eq!(compiled_single.variables.len(), 1);
+        assert_eq!(compiled_single.variables[0].name, "health");
 
-                let compiled = compile_project(&root).unwrap();
-                assert_eq!(compiled.len(), 1);
-                assert_eq!(compiled[0].name, "PlayerClass");
-                assert_eq!(compiled[0].variables.len(), 1);
-                assert_eq!(compiled[0].variables[0].name, "health");
+        let compiled = compile_project(&root).unwrap();
+        assert_eq!(compiled.len(), 1);
+        assert_eq!(compiled[0].name, "PlayerClass");
+        assert_eq!(compiled[0].variables.len(), 1);
+        assert_eq!(compiled[0].variables[0].name, "health");
 
-                let generated = compile_project_generated(&root).unwrap();
-                assert!(generated
-                        .files
-                        .contains_key("src/classes/player_class/mod.rs"));
-                assert!(generated
-                        .files
-                        .contains_key("src/classes/player_class/events/mod.rs"));
-                assert!(generated
-                        .files
-                        .contains_key("src/classes/player_class/events/events.rs"));
-                assert!(generated
-                        .files
-                        .contains_key("src/classes/player_class/vars/mod.rs"));
+        let generated = compile_project_generated(&root).unwrap();
+        assert!(generated
+            .files
+            .contains_key("src/classes/player_class/mod.rs"));
+        assert!(generated
+            .files
+            .contains_key("src/classes/player_class/events/mod.rs"));
+        assert!(generated
+            .files
+            .contains_key("src/classes/player_class/events/events.rs"));
+        assert!(generated
+            .files
+            .contains_key("src/classes/player_class/vars/mod.rs"));
 
-                let _ = std::fs::remove_dir_all(&root);
-        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

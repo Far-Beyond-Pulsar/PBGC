@@ -3,11 +3,10 @@
 //! Generates Rust source code from Blueprint graphs.
 
 use crate::metadata::BlueprintMetadataProvider;
-use graphy::{
-    GraphDescription, GraphyError, NodeTypes, NodeInstance,
-    DataResolver, ExecutionRouting,
-};
 use graphy::core::NodeMetadataProvider;
+use graphy::{
+    DataResolver, ExecutionRouting, GraphDescription, GraphyError, NodeInstance, NodeTypes,
+};
 use std::collections::{HashMap, HashSet};
 
 /// Blueprint-specific Rust code generator
@@ -70,14 +69,16 @@ impl<'a> BlueprintCodeGenerator<'a> {
         }
 
         // Find event nodes
-        let event_nodes: Vec<_> = self.graph
+        let event_nodes: Vec<_> = self
+            .graph
             .nodes
             .values()
             .filter(|node| {
                 // Custom event On nodes (node_type starts with "on_") are synthetic —
                 // no static metadata entry, but still treated as event entry points.
                 node.node_type.starts_with("on_")
-                    || self.metadata_provider
+                    || self
+                        .metadata_provider
                         .get_node_metadata(&node.node_type)
                         .map(|meta| meta.node_type == NodeTypes::event)
                         .unwrap_or(false)
@@ -93,7 +94,8 @@ impl<'a> BlueprintCodeGenerator<'a> {
         // Generate `#[pulsar_event]` structs for custom events
         for event_node in &event_nodes {
             if event_node.node_type.starts_with("on_") {
-                let event_name = pascal_case(&event_node.node_type.strip_prefix("on_").unwrap_or("custom"));
+                let event_name =
+                    pascal_case(&event_node.node_type.strip_prefix("on_").unwrap_or("custom"));
                 code.push_str(&format!("#[pulsar_event]\npub struct {} {{\n", event_name));
                 // Emit fields from output data pins (skip execution pins)
                 for pin in &event_node.outputs {
@@ -110,7 +112,8 @@ impl<'a> BlueprintCodeGenerator<'a> {
         }
 
         // Also collect custom event node types referenced by emit_custom_event nodes
-        let custom_event_structs: std::collections::HashSet<String> = self.graph
+        let custom_event_structs: std::collections::HashSet<String> = self
+            .graph
             .nodes
             .values()
             .filter(|n| n.node_type == "emit_custom_event")
@@ -179,7 +182,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
         code.push_str("    slot.set(Some(value));\n");
         code.push_str("}\n\n");
         code.push_str("#[inline]\n");
-        code.push_str("fn __pbgc_get_copy<T: Copy>(slot: &Cell<Option<T>>, var_name: &str) -> T {\n");
+        code.push_str(
+            "fn __pbgc_get_copy<T: Copy>(slot: &Cell<Option<T>>, var_name: &str) -> T {\n",
+        );
         code.push_str("    slot.get().unwrap_or_else(|| panic!(\"PBGC variable '{}' read before assignment\", var_name))\n");
         code.push_str("}\n\n");
         code.push_str("#[inline]\n");
@@ -187,7 +192,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
         code.push_str("    *slot.borrow_mut() = Some(value);\n");
         code.push_str("}\n\n");
         code.push_str("#[inline]\n");
-        code.push_str("fn __pbgc_get_clone<T: Clone>(slot: &RefCell<Option<T>>, var_name: &str) -> T {\n");
+        code.push_str(
+            "fn __pbgc_get_clone<T: Clone>(slot: &RefCell<Option<T>>, var_name: &str) -> T {\n",
+        );
         code.push_str("    slot.borrow()\n");
         code.push_str("        .as_ref()\n");
         code.push_str("        .cloned()\n");
@@ -213,7 +220,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
         // Custom event nodes don't have static metadata — infer from the node itself.
         if event_node.node_type.starts_with("on_") {
             let func_name = event_node.node_type.clone();
-            let mut params: Vec<String> = event_node.outputs.iter()
+            let mut params: Vec<String> = event_node
+                .outputs
+                .iter()
                 .filter(|p| !matches!(p.pin.data_type, graphy::DataType::Exec))
                 .map(|p| {
                     let type_str = match &p.pin.data_type {
@@ -234,7 +243,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
             // Follow execution chain
             for output_pin in &event_node.outputs {
                 if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
-                    let connected = self.exec_routing.get_connected_nodes(&event_node.id, &output_pin.id);
+                    let connected = self
+                        .exec_routing
+                        .get_connected_nodes(&event_node.id, &output_pin.id);
                     for next_node_id in connected {
                         if let Some(next_node) = self.graph.nodes.get(next_node_id) {
                             let mut generator = self.clone_with_new_visited();
@@ -249,17 +260,24 @@ impl<'a> BlueprintCodeGenerator<'a> {
         }
 
         // Get event metadata (for standard event nodes)
-        let metadata = self.metadata_provider
+        let metadata = self
+            .metadata_provider
             .get_node_metadata(&event_node.node_type)
             .ok_or_else(|| GraphyError::NodeNotFound(event_node.node_type.clone()))?;
 
         // Generate function signature — include any event parameters (e.g. delta_time for on_tick),
         // then the live-world slice every generated function receives (#651).
-        let mut params: Vec<String> = metadata.params.iter()
+        let mut params: Vec<String> = metadata
+            .params
+            .iter()
             .map(|p| format!("{}: {}", p.name, p.param_type))
             .collect();
         params.push(LIVE_WORLD_PARAMS.to_string());
-        code.push_str(&format!("pub fn {}({}) {{\n", metadata.name, params.join(", ")));
+        code.push_str(&format!(
+            "pub fn {}({}) {{\n",
+            metadata.name,
+            params.join(", ")
+        ));
 
         let pure_preamble = self.generate_pure_node_preamble(1)?;
         if !pure_preamble.is_empty() {
@@ -270,13 +288,18 @@ impl<'a> BlueprintCodeGenerator<'a> {
         // We need to look up by pin ID (from the node instance), not pin name (from metadata)
         for output_pin in &event_node.outputs {
             if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
-                tracing::debug!("[CODEGEN] Looking up exec connections for node {} pin ID: {}", 
-                    event_node.id, output_pin.id);
-                
-                let connected = self.exec_routing.get_connected_nodes(&event_node.id, &output_pin.id);
-                
+                tracing::debug!(
+                    "[CODEGEN] Looking up exec connections for node {} pin ID: {}",
+                    event_node.id,
+                    output_pin.id
+                );
+
+                let connected = self
+                    .exec_routing
+                    .get_connected_nodes(&event_node.id, &output_pin.id);
+
                 tracing::debug!("[CODEGEN] Found {} connected nodes", connected.len());
-                
+
                 for next_node_id in connected {
                     if let Some(next_node) = self.graph.nodes.get(next_node_id) {
                         let mut generator = self.clone_with_new_visited();
@@ -316,16 +339,21 @@ impl<'a> BlueprintCodeGenerator<'a> {
                 .strip_prefix("get_")
                 .filter(|name| self.variables.contains_key(*name))
             {
-                let var_type = self
-                    .variables
-                    .get(var_name)
-                    .ok_or_else(|| GraphyError::Custom(format!("Variable '{}' not found", var_name)))?;
+                let var_type = self.variables.get(var_name).ok_or_else(|| {
+                    GraphyError::Custom(format!("Variable '{}' not found", var_name))
+                })?;
                 let static_name = to_static_var_name(var_name);
 
                 if is_copy_type(var_type) {
-                    format!("{}.with(|v| __pbgc_get_copy(v, \"{}\"))", static_name, var_name)
+                    format!(
+                        "{}.with(|v| __pbgc_get_copy(v, \"{}\"))",
+                        static_name, var_name
+                    )
                 } else {
-                    format!("{}.with(|v| __pbgc_get_clone(v, \"{}\"))", static_name, var_name)
+                    format!(
+                        "{}.with(|v| __pbgc_get_clone(v, \"{}\"))",
+                        static_name, var_name
+                    )
                 }
             } else {
                 self.generate_pure_node_expression(node)?
@@ -347,8 +375,10 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let mut count = 0usize;
         for (consumer_id, node) in &self.graph.nodes {
             for input in &node.inputs {
-                if let Some(DataSource::Connection { source_node_id: sid, .. }) =
-                    self.data_resolver.get_input_source(consumer_id, &input.id)
+                if let Some(DataSource::Connection {
+                    source_node_id: sid,
+                    ..
+                }) = self.data_resolver.get_input_source(consumer_id, &input.id)
                 {
                     if sid == source_node_id {
                         count += 1;
@@ -361,7 +391,11 @@ impl<'a> BlueprintCodeGenerator<'a> {
     }
 
     /// Generate execution chain starting from a node
-    fn generate_exec_chain(&mut self, node: &NodeInstance, indent_level: usize) -> Result<String, GraphyError> {
+    fn generate_exec_chain(
+        &mut self,
+        node: &NodeInstance,
+        indent_level: usize,
+    ) -> Result<String, GraphyError> {
         let code = String::new();
 
         // Prevent infinite loops
@@ -404,7 +438,8 @@ impl<'a> BlueprintCodeGenerator<'a> {
             return self.generate_setter_node(node, indent_level);
         }
 
-        let node_meta = self.metadata_provider
+        let node_meta = self
+            .metadata_provider
             .get_node_metadata(&node.node_type)
             .ok_or_else(|| GraphyError::NodeNotFound(node.node_type.clone()))?;
 
@@ -413,9 +448,7 @@ impl<'a> BlueprintCodeGenerator<'a> {
                 // Pure nodes are pre-evaluated, skip in exec chain
                 Ok(code)
             }
-            NodeTypes::fn_ => {
-                self.generate_function_node(node, node_meta, indent_level)
-            }
+            NodeTypes::fn_ => self.generate_function_node(node, node_meta, indent_level),
             NodeTypes::control_flow => {
                 self.generate_control_flow_node(node, node_meta, indent_level)
             }
@@ -449,7 +482,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let rest = node
             .node_type
             .strip_prefix("comp_get_prop::")
-            .ok_or_else(|| GraphyError::Custom(format!("Bad comp_get_prop node: {}", node.node_type)))?;
+            .ok_or_else(|| {
+                GraphyError::Custom(format!("Bad comp_get_prop node: {}", node.node_type))
+            })?;
         let mut parts = rest.splitn(2, "::");
         let class_name = parts
             .next()
@@ -489,10 +524,12 @@ impl<'a> BlueprintCodeGenerator<'a> {
     ) -> Result<String, GraphyError> {
         use graphy::analysis::DataSource;
 
-        match self.data_resolver.get_input_source(&node.id, "component_ref") {
+        match self
+            .data_resolver
+            .get_input_source(&node.id, "component_ref")
+        {
             Some(DataSource::Connection { source_node_id, .. }) => {
-                let ref_expr =
-                    self.identity_producer_expr(&source_node_id)?;
+                let ref_expr = self.identity_producer_expr(&source_node_id)?;
                 Ok(format!(
                     "pulsar_game::script_refs::resolve_pin_target(\n\
                      \x20               _world,\n\
@@ -511,9 +548,11 @@ impl<'a> BlueprintCodeGenerator<'a> {
     /// (`get_component_ref`, `find_object_by_*`, `object_ref_literal`),
     /// shared by pure-input inlining and component_ref pin resolution (#654).
     fn identity_producer_expr(&self, source_node_id: &str) -> Result<String, GraphyError> {
-        let node = self.graph.nodes.get(source_node_id).ok_or_else(|| {
-            GraphyError::NodeNotFound(source_node_id.to_string())
-        })?;
+        let node = self
+            .graph
+            .nodes
+            .get(source_node_id)
+            .ok_or_else(|| GraphyError::NodeNotFound(source_node_id.to_string()))?;
 
         if let Some(rest) = node.node_type.strip_prefix("get_component_ref::") {
             let mut parts = rest.splitn(2, "::");
@@ -610,7 +649,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
         let rest = node
             .node_type
             .strip_prefix("comp_set_prop::")
-            .ok_or_else(|| GraphyError::Custom(format!("Bad comp_set_prop node: {}", node.node_type)))?;
+            .ok_or_else(|| {
+                GraphyError::Custom(format!("Bad comp_set_prop node: {}", node.node_type))
+            })?;
         let mut parts = rest.splitn(2, "::");
         let class_name = parts
             .next()
@@ -628,7 +669,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
             .filter(|p| p.id != "component_ref" && p.pin.name != "component")
             .find(|p| p.pin.name == "value" || !matches!(p.pin.data_type, graphy::DataType::Exec))
             .map(|p| p.id.clone())
-            .ok_or_else(|| GraphyError::Custom(format!("No value pin on comp_set_prop node: {}", node.id)))?;
+            .ok_or_else(|| {
+                GraphyError::Custom(format!("No value pin on comp_set_prop node: {}", node.id))
+            })?;
 
         let value_expr = self.generate_input_expression(&node.id, &value_pin_id)?;
         let target_expr = self.generate_pin_target_expr(node, class_name)?;
@@ -653,7 +696,8 @@ impl<'a> BlueprintCodeGenerator<'a> {
         );
 
         // Follow exec chain.
-        self.follow_exec_outputs(node, indent_level).map(|chain| format!("{code}{chain}"))
+        self.follow_exec_outputs(node, indent_level)
+            .map(|chain| format!("{code}{chain}"))
     }
 
     /// Generate code for `comp_call::{ClassName}::{MethodName}` (exec node).
@@ -665,10 +709,9 @@ impl<'a> BlueprintCodeGenerator<'a> {
         node: &NodeInstance,
         indent_level: usize,
     ) -> Result<String, GraphyError> {
-        let rest = node
-            .node_type
-            .strip_prefix("comp_call::")
-            .ok_or_else(|| GraphyError::Custom(format!("Bad comp_call node: {}", node.node_type)))?;
+        let rest = node.node_type.strip_prefix("comp_call::").ok_or_else(|| {
+            GraphyError::Custom(format!("Bad comp_call node: {}", node.node_type))
+        })?;
         let mut parts = rest.splitn(2, "::");
         let class_name = parts
             .next()
@@ -758,7 +801,8 @@ r#"{indent}match {target_expr} {{
         }
 
         // Follow exec chain.
-        self.follow_exec_outputs(node, indent_level).map(|chain| format!("{code}{chain}"))
+        self.follow_exec_outputs(node, indent_level)
+            .map(|chain| format!("{code}{chain}"))
     }
 
     /// Emit every exec-chain successor of `node` at the same indent level.
@@ -773,7 +817,9 @@ r#"{indent}match {target_expr} {{
         let mut code = String::new();
         for output_pin in &node.outputs {
             if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
-                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
+                let connected = self
+                    .exec_routing
+                    .get_connected_nodes(&node.id, &output_pin.id);
                 for next_node_id in connected {
                     if let Some(next_node) = self.graph.nodes.get(next_node_id) {
                         let next_code = self.generate_exec_chain(next_node, indent_level)?;
@@ -816,9 +862,12 @@ r#"{indent}match {target_expr} {{
             ));
         } else if !outputs.is_empty() {
             // Single output (the default "result" pin)
-            let result_var = self.data_resolver
+            let result_var = self
+                .data_resolver
                 .get_result_variable(&node.id)
-                .ok_or_else(|| GraphyError::Custom(format!("No result variable for node: {}", node.id)))?;
+                .ok_or_else(|| {
+                    GraphyError::Custom(format!("No result variable for node: {}", node.id))
+                })?;
 
             code.push_str(&format!(
                 "{}let {} = {}({});\n",
@@ -840,7 +889,9 @@ r#"{indent}match {target_expr} {{
         // Follow execution chain - look up by actual pin IDs from node instance
         for output_pin in &node.outputs {
             if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
-                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
+                let connected = self
+                    .exec_routing
+                    .get_connected_nodes(&node.id, &output_pin.id);
                 for next_node_id in connected {
                     if let Some(next_node) = self.graph.nodes.get(next_node_id) {
                         let next_code = self.generate_exec_chain(next_node, indent_level)?;
@@ -868,7 +919,9 @@ r#"{indent}match {target_expr} {{
 
         for output_pin in &node.outputs {
             if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
-                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
+                let connected = self
+                    .exec_routing
+                    .get_connected_nodes(&node.id, &output_pin.id);
 
                 let mut exec_code = String::new();
                 let local_visited = self.visited.clone();
@@ -898,12 +951,17 @@ r#"{indent}match {target_expr} {{
         let mut param_substitutions = HashMap::new();
         for param in &node_meta.params {
             // Find the actual pin ID from the node instance
-            let pin_id = node.inputs.iter()
+            let pin_id = node
+                .inputs
+                .iter()
                 .find(|input| input.pin.name == param.name)
                 .map(|input| input.id.clone())
-                .ok_or_else(|| GraphyError::Custom(
-                    format!("Input pin not found for parameter '{}' on node '{}'", param.name, node.id)
-                ))?;
+                .ok_or_else(|| {
+                    GraphyError::Custom(format!(
+                        "Input pin not found for parameter '{}' on node '{}'",
+                        param.name, node.id
+                    ))
+                })?;
 
             let value = self.generate_input_expression(&node.id, &pin_id)?;
             param_substitutions.insert(param.name.clone(), value);
@@ -927,26 +985,35 @@ r#"{indent}match {target_expr} {{
     }
 
     /// Generate code for a setter node
-    fn generate_setter_node(&mut self, node: &NodeInstance, indent_level: usize) -> Result<String, GraphyError> {
+    fn generate_setter_node(
+        &mut self,
+        node: &NodeInstance,
+        indent_level: usize,
+    ) -> Result<String, GraphyError> {
         let mut code = String::new();
         let indent = "    ".repeat(indent_level);
 
         // Extract variable name from node type (remove "set_" prefix)
-        let var_name = node.node_type
-            .strip_prefix("set_")
-            .ok_or_else(|| GraphyError::Custom(format!("Invalid setter node type: {}", node.node_type)))?;
+        let var_name = node.node_type.strip_prefix("set_").ok_or_else(|| {
+            GraphyError::Custom(format!("Invalid setter node type: {}", node.node_type))
+        })?;
 
         // Find the "value" input pin ID
-        let value_pin_id = node.inputs.iter()
+        let value_pin_id = node
+            .inputs
+            .iter()
             .find(|input| input.pin.name == "value")
             .map(|input| input.id.clone())
-            .ok_or_else(|| GraphyError::Custom(format!("Value input not found on setter node: {}", node.id)))?;
+            .ok_or_else(|| {
+                GraphyError::Custom(format!("Value input not found on setter node: {}", node.id))
+            })?;
 
         // Get the value to set
         let value_expr = self.generate_input_expression(&node.id, &value_pin_id)?;
 
         // Get variable type to determine Cell vs RefCell
-        let var_type = self.variables
+        let var_type = self
+            .variables
             .get(var_name)
             .ok_or_else(|| GraphyError::Custom(format!("Variable '{}' not found", var_name)))?;
 
@@ -957,23 +1024,21 @@ r#"{indent}match {target_expr} {{
         if is_copy_type {
             code.push_str(&format!(
                 "{}{}.with(|v| __pbgc_set_copy(v, {}));\n",
-                indent,
-                static_name,
-                value_expr
+                indent, static_name, value_expr
             ));
         } else {
             code.push_str(&format!(
                 "{}{}.with(|v| __pbgc_set_clone(v, {}));\n",
-                indent,
-                static_name,
-                value_expr
+                indent, static_name, value_expr
             ));
         }
 
         // Follow execution chain - use actual pin IDs from node instance
         for output_pin in &node.outputs {
             if matches!(output_pin.pin.data_type, graphy::DataType::Exec) {
-                let connected = self.exec_routing.get_connected_nodes(&node.id, &output_pin.id);
+                let connected = self
+                    .exec_routing
+                    .get_connected_nodes(&node.id, &output_pin.id);
                 for next_node_id in connected {
                     if let Some(next_node) = self.graph.nodes.get(next_node_id) {
                         let next_code = self.generate_exec_chain(next_node, indent_level)?;
@@ -987,21 +1052,30 @@ r#"{indent}match {target_expr} {{
     }
 
     /// Collect arguments for a function call
-    fn collect_arguments(&self, node: &NodeInstance, node_meta: &graphy::core::NodeMetadata) -> Result<Vec<String>, GraphyError> {
+    fn collect_arguments(
+        &self,
+        node: &NodeInstance,
+        node_meta: &graphy::core::NodeMetadata,
+    ) -> Result<Vec<String>, GraphyError> {
         let mut args = Vec::new();
 
         for param in &node_meta.params {
             // Find the actual pin ID from the node instance
             // Pin IDs are typically "{node_id}_{param_name}"
-            let pin_id = node.inputs.iter()
+            let pin_id = node
+                .inputs
+                .iter()
                 .find(|input| {
                     // Match by name - the pin's name should match the param name
                     input.pin.name == param.name
                 })
                 .map(|input| input.id.clone())
-                .ok_or_else(|| GraphyError::Custom(
-                    format!("Input pin not found for parameter '{}' on node '{}'", param.name, node.id)
-                ))?;
+                .ok_or_else(|| {
+                    GraphyError::Custom(format!(
+                        "Input pin not found for parameter '{}' on node '{}'",
+                        param.name, node.id
+                    ))
+                })?;
 
             let value = self.generate_input_expression(&node.id, &pin_id)?;
             args.push(value);
@@ -1012,7 +1086,11 @@ r#"{indent}match {target_expr} {{
 
     /// Generate expression for an input value
     /// pin_id should be the actual pin ID from the node instance (e.g., "print_1_value")
-    fn generate_input_expression(&self, node_id: &str, pin_id: &str) -> Result<String, GraphyError> {
+    fn generate_input_expression(
+        &self,
+        node_id: &str,
+        pin_id: &str,
+    ) -> Result<String, GraphyError> {
         use graphy::analysis::DataSource;
 
         /// Resolve the output pin name on the source node for a multi-output accessor.
@@ -1025,23 +1103,33 @@ r#"{indent}match {target_expr} {{
             let src_node = graph.nodes.get(source_node_id)?;
             let src_meta = metadata_provider.get_node_metadata(&src_node.node_type)?;
             // Find the pin name by matching pin instance ID
-            let pin_name = src_node.outputs.iter()
+            let pin_name = src_node
+                .outputs
+                .iter()
                 .find(|p| p.id == source_pin_id)
                 .map(|p| p.pin.name.as_str())?;
             let outputs = src_meta.effective_outputs();
             if outputs.len() <= 1 {
                 return None;
             }
-            outputs.iter()
-                .find(|o| o.name == pin_name)
-                .and_then(|o| {
-                    if o.accessor.is_empty() { None } else { Some(o.accessor.clone()) }
-                })
+            outputs.iter().find(|o| o.name == pin_name).and_then(|o| {
+                if o.accessor.is_empty() {
+                    None
+                } else {
+                    Some(o.accessor.clone())
+                }
+            })
         }
 
         match self.data_resolver.get_input_source(node_id, pin_id) {
-            Some(DataSource::Connection { source_node_id, source_pin }) => {
-                let source_node = self.graph.nodes.get(source_node_id)
+            Some(DataSource::Connection {
+                source_node_id,
+                source_pin,
+            }) => {
+                let source_node = self
+                    .graph
+                    .nodes
+                    .get(source_node_id)
                     .ok_or_else(|| GraphyError::NodeNotFound(source_node_id.clone()))?;
 
                 // Check if source is a component property getter (pure)
@@ -1068,28 +1156,43 @@ r#"{indent}match {target_expr} {{
                     .strip_prefix("get_")
                     .filter(|name| self.variables.contains_key(*name))
                 {
-                    let var_type = self.variables.get(var_name)
-                        .ok_or_else(|| GraphyError::Custom(format!("Variable '{}' not found", var_name)))?;
+                    let var_type = self.variables.get(var_name).ok_or_else(|| {
+                        GraphyError::Custom(format!("Variable '{}' not found", var_name))
+                    })?;
 
                     let static_name = to_static_var_name(var_name);
 
                     let is_copy = is_copy_type(var_type);
                     return if is_copy {
-                        Ok(format!("{}.with(|v| __pbgc_get_copy(v, \"{}\"))", static_name, var_name))
+                        Ok(format!(
+                            "{}.with(|v| __pbgc_get_copy(v, \"{}\"))",
+                            static_name, var_name
+                        ))
                     } else {
-                        Ok(format!("{}.with(|v| __pbgc_get_clone(v, \"{}\"))", static_name, var_name))
+                        Ok(format!(
+                            "{}.with(|v| __pbgc_get_clone(v, \"{}\"))",
+                            static_name, var_name
+                        ))
                     };
                 }
 
                 // Check if source is pure. Prefer precomputed temporary results
                 // to avoid duplicating pure function calls across downstream uses.
-                if let Some(node_meta) = self.metadata_provider.get_node_metadata(&source_node.node_type) {
+                if let Some(node_meta) = self
+                    .metadata_provider
+                    .get_node_metadata(&source_node.node_type)
+                {
                     if node_meta.node_type == NodeTypes::pure {
                         if self.should_materialize_pure_result(source_node_id) {
-                            if let Some(var_name) = self.data_resolver.get_result_variable(source_node_id) {
+                            if let Some(var_name) =
+                                self.data_resolver.get_result_variable(source_node_id)
+                            {
                                 // Check for multi-output accessor
                                 if let Some(acc) = get_multi_output_accessor(
-                                    self.metadata_provider, self.graph, source_node_id, &source_pin
+                                    self.metadata_provider,
+                                    self.graph,
+                                    source_node_id,
+                                    &source_pin,
                                 ) {
                                     return Ok(format!("{}{}", var_name, acc));
                                 }
@@ -1099,7 +1202,10 @@ r#"{indent}match {target_expr} {{
                         let expr = self.generate_pure_node_expression(source_node)?;
                         // Check for multi-output accessor on the inline expression
                         if let Some(acc) = get_multi_output_accessor(
-                            self.metadata_provider, self.graph, source_node_id, &source_pin
+                            self.metadata_provider,
+                            self.graph,
+                            source_node_id,
+                            &source_pin,
                         ) {
                             return Ok(format!("({}){}", expr, acc));
                         }
@@ -1111,14 +1217,20 @@ r#"{indent}match {target_expr} {{
                 if let Some(var_name) = self.data_resolver.get_result_variable(source_node_id) {
                     // Check for multi-output accessor
                     if let Some(acc) = get_multi_output_accessor(
-                        self.metadata_provider, self.graph, source_node_id, &source_pin
+                        self.metadata_provider,
+                        self.graph,
+                        source_node_id,
+                        &source_pin,
                     ) {
                         Ok(format!("{}{}", var_name, acc))
                     } else {
                         Ok(var_name.clone())
                     }
                 } else {
-                    Err(GraphyError::Custom(format!("No variable for source node: {}", source_node_id)))
+                    Err(GraphyError::Custom(format!(
+                        "No variable for source node: {}",
+                        source_node_id
+                    )))
                 }
             }
             Some(DataSource::Constant(value)) => Ok(value.clone()),
@@ -1137,13 +1249,17 @@ r#"{indent}match {target_expr} {{
                     Err(GraphyError::NodeNotFound(node_id.to_string()))
                 }
             }
-            None => Err(GraphyError::Custom(format!("No data source for input: {}.{}", node_id, pin_id))),
+            None => Err(GraphyError::Custom(format!(
+                "No data source for input: {}.{}",
+                node_id, pin_id
+            ))),
         }
     }
 
     /// Generate inlined expression for a pure node
     fn generate_pure_node_expression(&self, node: &NodeInstance) -> Result<String, GraphyError> {
-        let node_meta = self.metadata_provider
+        let node_meta = self
+            .metadata_provider
             .get_node_metadata(&node.node_type)
             .ok_or_else(|| GraphyError::NodeNotFound(node.node_type.clone()))?;
 
@@ -1151,12 +1267,17 @@ r#"{indent}match {target_expr} {{
         let mut args = Vec::new();
         for param in &node_meta.params {
             // Find the actual pin ID from the node instance
-            let pin_id = node.inputs.iter()
+            let pin_id = node
+                .inputs
+                .iter()
                 .find(|input| input.pin.name == param.name)
                 .map(|input| input.id.clone())
-                .ok_or_else(|| GraphyError::Custom(
-                    format!("Input pin not found for parameter '{}' on node '{}'", param.name, node.id)
-                ))?;
+                .ok_or_else(|| {
+                    GraphyError::Custom(format!(
+                        "Input pin not found for parameter '{}' on node '{}'",
+                        param.name, node.id
+                    ))
+                })?;
 
             let arg_expr = self.generate_input_expression(&node.id, &pin_id)?;
             args.push(arg_expr);
@@ -1182,8 +1303,20 @@ r#"{indent}match {target_expr} {{
 fn is_copy_type(type_str: &str) -> bool {
     matches!(
         type_str,
-        "i32" | "i64" | "u32" | "u64" | "f32" | "f64" | "bool" | "char" |
-        "usize" | "isize" | "i8" | "i16" | "u8" | "u16"
+        "i32"
+            | "i64"
+            | "u32"
+            | "u64"
+            | "f32"
+            | "f64"
+            | "bool"
+            | "char"
+            | "usize"
+            | "isize"
+            | "i8"
+            | "i16"
+            | "u8"
+            | "u16"
     )
 }
 

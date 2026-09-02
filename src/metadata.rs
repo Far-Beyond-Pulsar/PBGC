@@ -30,16 +30,10 @@ fn convert_node_metadata(ps_node: &pulsar_std::registry::NodeMetadata) -> NodeMe
         .collect();
 
     // Convert return type
-    let return_type = ps_node
-        .return_type
-        .map(|ty| TypeInfo::new(ty.to_string()));
+    let return_type = ps_node.return_type.map(|ty| TypeInfo::new(ty.to_string()));
 
     // Convert exec outputs
-    let exec_outputs: Vec<String> = ps_node
-        .exec_outputs
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let exec_outputs: Vec<String> = ps_node.exec_outputs.iter().map(|s| s.to_string()).collect();
 
     // Convert imports - flatten NodeImport into simple import strings
     let imports: Vec<String> = ps_node
@@ -49,7 +43,11 @@ fn convert_node_metadata(ps_node: &pulsar_std::registry::NodeMetadata) -> NodeMe
             if import.items.is_empty() {
                 format!("use {};", import.crate_name)
             } else {
-                format!("use {}::{{{}}};", import.crate_name, import.items.join(", "))
+                format!(
+                    "use {}::{{{}}};",
+                    import.crate_name,
+                    import.items.join(", ")
+                )
             }
         })
         .collect();
@@ -102,7 +100,7 @@ fn convert_node_metadata(ps_node: &pulsar_std::registry::NodeMetadata) -> NodeMe
 /// in static memory, so multiple threads can access it concurrently without locks.
 pub fn extract_node_metadata() -> Result<HashMap<String, NodeMetadata>, String> {
     let ps_nodes = pulsar_std::get_all_nodes();
-    
+
     let mut metadata = HashMap::new();
     for ps_node in ps_nodes {
         let node = convert_node_metadata(ps_node);
@@ -118,16 +116,17 @@ pub fn extract_node_metadata() -> Result<HashMap<String, NodeMetadata>, String> 
 /// The metadata is extracted from pulsar_std on first call and cached for
 /// all subsequent calls.
 pub fn get_node_metadata() -> &'static HashMap<String, NodeMetadata> {
-    NODE_METADATA.get_or_init(|| {
-        match extract_node_metadata() {
-            Ok(metadata) => {
-                tracing::info!("[PBGC] Loaded {} node definitions from pulsar_std", metadata.len());
-                metadata
-            }
-            Err(e) => {
-                tracing::error!("[PBGC] Failed to extract node metadata: {}", e);
-                HashMap::new()
-            }
+    NODE_METADATA.get_or_init(|| match extract_node_metadata() {
+        Ok(metadata) => {
+            tracing::info!(
+                "[PBGC] Loaded {} node definitions from pulsar_std",
+                metadata.len()
+            );
+            metadata
+        }
+        Err(e) => {
+            tracing::error!("[PBGC] Failed to extract node metadata: {}", e);
+            HashMap::new()
         }
     })
 }
@@ -145,11 +144,10 @@ pub struct BlueprintMetadataProvider {
 
 impl BlueprintMetadataProvider {
     pub fn new() -> Self {
-        let raw: HashMap<String, &'static pulsar_std::NodeMetadata> =
-            pulsar_std::get_all_nodes()
-                .iter()
-                .map(|m| (m.name.to_string(), m))
-                .collect();
+        let raw: HashMap<String, &'static pulsar_std::NodeMetadata> = pulsar_std::get_all_nodes()
+            .iter()
+            .map(|m| (m.name.to_string(), m))
+            .collect();
         Self {
             metadata: get_node_metadata(),
             raw,

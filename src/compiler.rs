@@ -2,13 +2,12 @@
 //!
 //! Main entry points for compiling Blueprint graphs to Rust code.
 
-use crate::metadata::{BlueprintMetadataProvider, get_node_metadata};
-use crate::codegen::{BlueprintCodeGenerator, BytecodeCodegen};
 use crate::bytecode::comp_ops::ComponentOpRef;
 use crate::bytecode::BpProgram;
-use graphy::{GraphDescription, GraphyError, DataResolver, ExecutionRouting};
+use crate::codegen::{BlueprintCodeGenerator, BytecodeCodegen};
+use crate::metadata::{get_node_metadata, BlueprintMetadataProvider};
+use graphy::{DataResolver, ExecutionRouting, GraphDescription, GraphyError};
 use std::collections::HashMap;
-
 
 /// Compile a Blueprint graph to Rust source code
 ///
@@ -60,10 +59,12 @@ pub fn compile_graph_with_library_manager(
     _library_manager: Option<()>, // TODO: Define LibraryManager type
 ) -> Result<String, GraphyError> {
     tracing::info!("[PBGC] Starting Blueprint compilation");
-    tracing::info!("[PBGC] Graph: {} ({} nodes, {} connections)",
+    tracing::info!(
+        "[PBGC] Graph: {} ({} nodes, {} connections)",
         graph.metadata.name,
         graph.nodes.len(),
-        graph.connections.len());
+        graph.connections.len()
+    );
 
     // Create a mutable copy for expansion
     let expanded_graph = graph.clone();
@@ -84,8 +85,10 @@ pub fn compile_graph_with_library_manager(
     tracing::info!("[PBGC] Phase 2: Analyzing data flow...");
     let data_resolver = DataResolver::build(&expanded_graph, &metadata_provider)?;
     tracing::info!("[PBGC] Data flow analysis complete");
-    tracing::info!("[PBGC]   - {} pure nodes in evaluation order",
-        data_resolver.get_pure_evaluation_order().len());
+    tracing::info!(
+        "[PBGC]   - {} pure nodes in evaluation order",
+        data_resolver.get_pure_evaluation_order().len()
+    );
 
     // Phase 3: Build execution routing
     tracing::info!("[PBGC] Phase 3: Analyzing execution flow...");
@@ -192,8 +195,12 @@ pub fn compile_graph_to_bytecode_full(
     variables: HashMap<String, String>,
 ) -> Result<BytecodeCompilation, GraphyError> {
     tracing::info!("[PBGC] Starting bytecode compilation");
-    tracing::info!("[PBGC] Graph: {} ({} nodes, {} connections)",
-        graph.metadata.name, graph.nodes.len(), graph.connections.len());
+    tracing::info!(
+        "[PBGC] Graph: {} ({} nodes, {} connections)",
+        graph.metadata.name,
+        graph.nodes.len(),
+        graph.connections.len()
+    );
 
     let metadata_provider = BlueprintMetadataProvider::new();
     let data_resolver = DataResolver::build(graph, &metadata_provider)?;
@@ -214,7 +221,10 @@ pub fn compile_graph_to_bytecode_full(
         programs.len(),
         components.len()
     );
-    Ok(BytecodeCompilation { programs, components })
+    Ok(BytecodeCompilation {
+        programs,
+        components,
+    })
 }
 
 #[cfg(test)]
@@ -227,7 +237,8 @@ mod tests {
     fn branch_condition_from_pure_chain_inlines_single_use_pure_nodes() {
         let mut graph = GraphDescription::new("branch_pure_chain");
 
-        let mut begin = graphy::NodeInstance::new("begin", "begin_play", Position { x: 0.0, y: 0.0 });
+        let mut begin =
+            graphy::NodeInstance::new("begin", "begin_play", Position { x: 0.0, y: 0.0 });
         begin.outputs.push(PinInstance::new(
             "begin_exec",
             Pin::new("begin_exec", "Body", DataType::Exec, PinType::Output),
@@ -244,12 +255,20 @@ mod tests {
         ));
         add.outputs.push(PinInstance::new(
             "add_result",
-            Pin::new("add_result", "result", DataType::typed("f64"), PinType::Output),
+            Pin::new(
+                "add_result",
+                "result",
+                DataType::typed("f64"),
+                PinType::Output,
+            ),
         ));
-        add.properties.insert("add_a".to_string(), serde_json::json!(1.0));
-        add.properties.insert("add_b".to_string(), serde_json::json!(3.0));
+        add.properties
+            .insert("add_a".to_string(), serde_json::json!(1.0));
+        add.properties
+            .insert("add_b".to_string(), serde_json::json!(3.0));
 
-        let mut gt = graphy::NodeInstance::new("gt_node", "greater_than", Position { x: 200.0, y: 0.0 });
+        let mut gt =
+            graphy::NodeInstance::new("gt_node", "greater_than", Position { x: 200.0, y: 0.0 });
         gt.inputs.push(PinInstance::new(
             "gt_a",
             Pin::new("gt_a", "a", DataType::typed("f64"), PinType::Input),
@@ -260,18 +279,30 @@ mod tests {
         ));
         gt.outputs.push(PinInstance::new(
             "gt_result",
-            Pin::new("gt_result", "result", DataType::typed("bool"), PinType::Output),
+            Pin::new(
+                "gt_result",
+                "result",
+                DataType::typed("bool"),
+                PinType::Output,
+            ),
         ));
-        gt.properties.insert("gt_b".to_string(), serde_json::json!(3.0));
+        gt.properties
+            .insert("gt_b".to_string(), serde_json::json!(3.0));
 
-        let mut branch = graphy::NodeInstance::new("branch_node", "branch", Position { x: 300.0, y: 0.0 });
+        let mut branch =
+            graphy::NodeInstance::new("branch_node", "branch", Position { x: 300.0, y: 0.0 });
         branch.inputs.push(PinInstance::new(
             "branch_exec",
             Pin::new("branch_exec", "exec", DataType::Exec, PinType::Input),
         ));
         branch.inputs.push(PinInstance::new(
             "branch_condition",
-            Pin::new("branch_condition", "condition", DataType::typed("bool"), PinType::Input),
+            Pin::new(
+                "branch_condition",
+                "condition",
+                DataType::typed("bool"),
+                PinType::Input,
+            ),
         ));
         branch.outputs.push(PinInstance::new(
             "branch_true",
