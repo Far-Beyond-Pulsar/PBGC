@@ -1,27 +1,17 @@
 [package]
 name = "pbgc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Pulsar Team"]
-description = "Pulsar Blueprint Graph Compiler - Production-ready compiler for Blueprint visual scripts"
+description = "The pulsar_std Blueprint node catalogue as Graphy node metadata (palettes, pin shapes, graph validation)"
 license = "MIT"
 
 [dependencies]
-# General graph compilation library
+# General graph library whose NodeMetadata this crate fills.
 graphy = { git = "https://github.com/Far-Beyond-Pulsar/Graphy", rev = "c43924070aa0955302f8015708625be279da77a7" }
 
 # Pulsar standard library integration
 pulsar_std = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Native", rev = "38bbbd93a5986c43955af8879380ee544025abbb" }
 
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
 # Logging
 tracing = "0.1"
-
-# Error handling
-thiserror = "1.0"
-
-[dev-dependencies]
-tracing-subscriber = "0.3"

@@ -1,39 +1,18 @@
-pub mod bytecode;
-pub mod codegen;
-pub mod compiler;
-pub mod disk;
+//! # PBGC: the pulsar_std node catalogue for Graphy
+//!
+//! The Blueprint graph compiler used to live here, with a bytecode VM and a
+//! graph-to-Rust backend. Both are gone: Blueprint graphs now compile to
+//! language-neutral script modules (`blueprint_compiler`, in the Blueprint
+//! plugin) that the engine's script VM runs, and the Rust export generates
+//! its code from that same module (`pulsar_script_codegen`).
+//!
+//! What remains is the bridge between `pulsar_std`'s `#[blueprint]` registry
+//! and Graphy's node metadata: palettes, pin shapes and graph validation read
+//! the standard library's nodes through it.
+
 pub mod metadata;
-pub mod project;
-pub mod vm;
 
-// Rust source codegen
-pub use compiler::{
-    compile_graph, compile_graph_to_bytecode, compile_graph_to_bytecode_full,
-    compile_graph_to_bytecode_with_variables, compile_graph_with_library_manager,
-    compile_graph_with_variables, BytecodeCompilation,
+pub use metadata::{
+    extract_node_metadata, find_node, get_categories, get_node_metadata, get_nodes_by_category,
+    BlueprintMetadataProvider,
 };
-
-// Bytecode types
-pub use bytecode::comp_ops::{parse_node_type, CompOpKind, ComponentOpRef};
-pub use bytecode::{BpProgram, Instruction, LabelId};
-
-// VM execution APIs
-pub use vm::{run, run_with_external_arena, DispatchFn, VmError};
-
-// Disk / project
-pub use disk::{compile_project, compile_project_generated};
-pub use project::{
-    compile_graph_to_actor_source, generate_blueprint_actor_source,
-    generate_blueprint_actor_source_with_components, generate_project, CompiledBlueprint,
-    CompiledComponent, CompiledVariable, GeneratedProject, ProjectSpec,
-};
-
-// Graphy re-exports
-pub use graphy::core::TypeInfo;
-pub use graphy::{
-    Connection, ConnectionType, DataType, GraphDescription, GraphMetadata, GraphyError, JsonValue,
-    NodeInstance, NodeMetadata, NodeMetadataProvider, NodeTypes, Pin, PinInstance, PinType,
-    Position, Result,
-};
-
-pub use metadata::{extract_node_metadata, BlueprintMetadataProvider};

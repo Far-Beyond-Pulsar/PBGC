@@ -1,47 +1,31 @@
-# PBGC - Pulsar Blueprint Graph Compiler
+# PBGC: pulsar_std node catalogue for Graphy
 
-Compiler for Pulsar Blueprint visual scripts to Rust code.
-
-## Features
-
-- Compiles Blueprint node graphs to executable Rust code
-- Integrates with pulsar_std node registry
-- Thread-safe variable handling (Cell/RefCell + Arc)
-- Drop-in replacement for existing compiler
-
-## Quick Start
+PBGC bridges `pulsar_std`'s `#[blueprint]` node registry and
+[Graphy](https://github.com/Far-Beyond-Pulsar/Graphy)'s node metadata. The
+Blueprint editor reads the standard library's nodes through it for its palette,
+pin shapes and graph validation.
 
 ```rust
-use pbgc::compile_graph;
-use graphy::GraphDescription;
-
-let graph = GraphDescription::new("my_blueprint");
-// ... build graph with nodes and connections
-
-match compile_graph(&graph) {
-    Ok(rust_code) => std::fs::write("generated.rs", rust_code)?,
-    Err(e) => eprintln!("Error: {}", e),
-}
+let metadata = pbgc::extract_node_metadata()?;           // every pulsar_std node
+let provider = pbgc::BlueprintMetadataProvider::new();   // for graphy::DataResolver
 ```
 
-## Integration with Pulsar Engine
+## What was removed (0.2.0)
 
-Replace existing compiler calls:
+PBGC used to compile Blueprint graphs itself. That is gone:
 
-```rust
-// OLD:
-use pulsar_engine::compiler::compile_graph;
+| Removed | Replacement |
+|---|---|
+| `compile_graph`, `compile_graph_with_variables`, `compile_graph_with_library_manager` (graph to Rust source) | Compile to a script module with `blueprint_compiler`, then export with `pulsar_script_codegen::actor::generate_actor` |
+| `compile_graph_to_bytecode*`, `BpProgram`, `Instruction`, `vm::run`, `VmError` (the old bytecode and its VM) | `pulsar_script_vm`: `Module`, `Program`, `Vm` |
+| `generate_project`, `generate_blueprint_actor_source*`, `ProjectSpec`, `CompiledBlueprint` | `pulsar_script_codegen::actor::{generate_actor, class_files}` |
+| `compile_project`, `compile_project_generated` | compile each class with `blueprint_compiler`, export with `class_files` |
+| `BlueprintMetadataProvider::param_layout` / `return_layout` (bytecode layout helpers) | none: the script VM is typed, not layout-based |
+| Graphy re-exports (`pbgc::GraphDescription`, ...) | depend on `graphy` directly |
 
-// NEW:
-use pbgc::compile_graph;
+The Rust export no longer keeps class variables in thread-local statics shared
+by every instance of a class, and no longer sleeps the thread for `delay`: each
+actor owns its script state and waits are suspended calls.
 
-// API is identical - drop-in replacement!
-```
-
-## Architecture
-
-Built on [Graphy](https://github.com/Far-Beyond-Pulsar/Graphy) library with Blueprint-specific:
-- pulsar_std integration
-- Rust code generation
-- Variable getter/setter handling
-- Event node support
+Anything outside the Pulsar-Native repository that still calls the removed
+APIs must move to the replacements above; this is a breaking release.
